@@ -109,7 +109,7 @@ export default function Navbar() {
             <div>
               <div className="flex items-center space-x-2">
                 <span className="font-bold text-lg bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent">
-                  Sheela AI
+                  SceneMind AI
                 </span>
                 <span className="text-[10px] uppercase font-semibold tracking-wider bg-blue-500/10 text-blue-400 border border-blue-500/30 px-1.5 py-0.5 rounded">
                   Studio

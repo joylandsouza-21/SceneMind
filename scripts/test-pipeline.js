@@ -40,7 +40,7 @@ function assert(condition, message) {
 }
 
 async function runSuite() {
-  console.log(bold(blue('\n=== STARTING SHEELA AI AUTOMATED VERIFICATION SUITE ===\n')));
+  console.log(bold(blue('\n=== STARTING SCENEMIND AI AUTOMATED VERIFICATION SUITE ===\n')));
 
   const storageDir = path.resolve(process.cwd(), 'storage');
   const testVideoPath = path.join(storageDir, 'videos', 'test_synthetic.mp4');

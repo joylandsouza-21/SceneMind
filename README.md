@@ -1,6 +1,6 @@
-# Sheela AI — AI-Powered Video Indexing & Semantic Clipping Platform
+# SceneMind AI — Video Indexing & Semantic Clipping Platform
 
-Sheela AI is a complete, production-ready web application for **AI-powered video indexing and semantic video clipping**, built to support long videos (up to 2+ hours), multimodal AI scene understanding, vector similarity search, second-pass AI timestamp verification, and frame-accurate FFmpeg sub-clip extraction.
+SceneMind AI is a complete, production-ready web application for **AI-powered video indexing and semantic video clipping**, built to support long videos (up to 2+ hours), multimodal AI scene understanding, vector similarity search, second-pass AI timestamp verification, and frame-accurate FFmpeg sub-clip extraction.
 
 ---
 

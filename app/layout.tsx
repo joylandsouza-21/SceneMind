@@ -3,7 +3,7 @@ import Navbar from '@/components/Navbar';
 import type { Metadata } from 'next';
 
 export const metadata: Metadata = {
-  title: 'Sheela AI | Video Indexing & Semantic Clipping',
+  title: 'SceneMind AI | Video Indexing & Semantic Clipping',
   description: 'AI-powered multimodal video indexing, semantic vector search, and frame-accurate sub-clip extraction.',
 };
 
@@ -21,7 +21,7 @@ export default function RootLayout({
         </main>
         <footer className="border-t border-slate-800/60 py-6 text-center text-xs text-slate-500">
           <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
-            <div>Sheela AI Video Intelligence Platform • Multimodal Semantic Indexing</div>
+            <div>SceneMind AI • Multimodal Semantic Video Intelligence Platform</div>
             <div className="flex items-center space-x-4">
               <span>Gemini 2.5 Flash</span>
               <span>•</span>
