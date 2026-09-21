@@ -21,6 +21,9 @@ import { formatTime } from '@/components/VideoPlayer';
 import ClipModal from '@/components/ClipModal';
 import GroupSelectDropdown from '@/components/GroupSelectDropdown';
 
+const MAX_PROMPT_TOKENS = 2048;
+const MAX_PROMPT_CHARS = 8192;
+
 export default function GlobalSearchPage() {
   const [query, setQuery] = useState('');
   const [groups, setGroups] = useState<any[]>([]);
@@ -28,10 +31,17 @@ export default function GlobalSearchPage() {
   const [isSearching, setIsSearching] = useState(false);
   const [results, setResults] = useState<any[]>([]);
   const [hasSearched, setHasSearched] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   // Clip modal state
   const [clipModalOpen, setClipModalOpen] = useState(false);
   const [activeClipData, setActiveClipData] = useState<any | null>(null);
+
+  // Prompt token & character estimation
+  const estimatedTokens = Math.ceil(query.length / 4);
+  const isOverLimit = estimatedTokens > MAX_PROMPT_TOKENS || query.length > MAX_PROMPT_CHARS;
+  const isNearLimit = estimatedTokens > MAX_PROMPT_TOKENS * 0.8 && !isOverLimit;
+  const progressPercent = Math.min(100, Math.round((estimatedTokens / MAX_PROMPT_TOKENS) * 100));
 
   useEffect(() => {
     fetch('/api/groups')
@@ -55,6 +65,16 @@ export default function GlobalSearchPage() {
     const g = customGroup !== undefined ? customGroup : selectedGroupId;
     if (!q || q.trim() === '') return;
 
+    setSearchError(null);
+
+    const tokens = Math.ceil(q.length / 4);
+    if (tokens > MAX_PROMPT_TOKENS || q.length > MAX_PROMPT_CHARS) {
+      setSearchError(
+        `Prompt exceeds Google Gemini embedding limit of 2,048 tokens (~${tokens} tokens / ${q.length} chars). Please shorten your search query.`
+      );
+      return;
+    }
+
     if (customQuery !== undefined) setQuery(customQuery);
     if (customGroup !== undefined) setSelectedGroupId(customGroup);
     setIsSearching(true);
@@ -75,9 +95,14 @@ export default function GlobalSearchPage() {
       const data = await res.json();
       if (res.ok) {
         setResults(data.results || []);
+      } else {
+        setSearchError(data.error || 'Search failed. Please verify API configuration or try again.');
+        setResults([]);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Global search error:', err);
+      setSearchError(err?.message || 'Network error occurred while executing search.');
+      setResults([]);
     } finally {
       setIsSearching(false);
     }
@@ -112,7 +137,7 @@ export default function GlobalSearchPage() {
             selectedGroupId={selectedGroupId}
             onSelectGroup={(id) => {
               setSelectedGroupId(id);
-              if (query.trim()) {
+              if (query.trim() && !isOverLimit) {
                 handleSearch(undefined, undefined, id);
               }
             }}
@@ -128,26 +153,104 @@ export default function GlobalSearchPage() {
             <input
               type="text"
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                if (searchError) setSearchError(null);
+              }}
               placeholder={
                 activeGroup
                   ? `Search inside "${activeGroup.name}" episodes (e.g. "fight scene", "dialogue")...`
                   : 'Search all videos (e.g. "Find all fight scenes", "two people arguing")...'
               }
-              className="w-full pl-12 pr-4 py-3.5 bg-slate-950/80 border border-slate-700/80 rounded-2xl text-white placeholder-slate-500 text-sm focus:outline-none focus:border-blue-500 shadow-inner"
+              className={`w-full pl-12 pr-4 py-3.5 bg-slate-950/80 border rounded-2xl text-white placeholder-slate-500 text-sm focus:outline-none shadow-inner transition-colors ${
+                isOverLimit
+                  ? 'border-rose-500/80 focus:border-rose-400 focus:ring-1 focus:ring-rose-500/30'
+                  : isNearLimit
+                  ? 'border-amber-500/80 focus:border-amber-400'
+                  : 'border-slate-700/80 focus:border-blue-500'
+              }`}
             />
           </div>
 
           {/* Submit Button */}
           <button
             type="submit"
-            disabled={isSearching || !query.trim()}
-            className="px-6 py-3.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold text-sm rounded-2xl shadow-lg shadow-blue-500/20 transition-all flex items-center justify-center space-x-2 shrink-0"
+            disabled={isSearching || !query.trim() || isOverLimit}
+            className="px-6 py-3.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold text-sm rounded-2xl shadow-lg shadow-blue-500/20 transition-all flex items-center justify-center space-x-2 shrink-0"
           >
             {isSearching ? <span className="animate-spin">🌀</span> : <Search className="w-4 h-4" />}
             <span>Search</span>
           </button>
         </form>
+
+        {/* Prompt Limit & Token Status Bar */}
+        <div className="flex flex-wrap items-center justify-between gap-3 text-xs pt-0.5">
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900/90 border border-slate-800">
+              <span className="text-slate-400 font-medium">Prompt size:</span>
+              <span
+                className={`font-mono font-semibold ${
+                  isOverLimit
+                    ? 'text-rose-400'
+                    : isNearLimit
+                    ? 'text-amber-400'
+                    : 'text-slate-200'
+                }`}
+              >
+                ~{estimatedTokens.toLocaleString()}
+              </span>
+              <span className="text-slate-500 font-mono">/ 2,048 tokens</span>
+              <span className="text-slate-600">•</span>
+              <span className="text-slate-400 font-mono">{query.length.toLocaleString()} chars</span>
+            </div>
+
+            {/* Progress Mini Meter */}
+            <div className="w-20 bg-slate-800/80 h-1.5 rounded-full overflow-hidden hidden sm:block">
+              <div
+                className={`h-full rounded-full transition-all duration-200 ${
+                  isOverLimit
+                    ? 'bg-rose-500'
+                    : isNearLimit
+                    ? 'bg-amber-500'
+                    : 'bg-gradient-to-r from-blue-500 to-indigo-500'
+                }`}
+                style={{ width: `${progressPercent}%` }}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-slate-500 font-medium hidden md:inline">
+              Google Gemini text-embedding-004 limit: 2,048 tokens (~8,192 chars)
+            </span>
+            {isOverLimit && (
+              <span className="text-[11px] font-semibold text-rose-400 bg-rose-500/10 border border-rose-500/30 px-2 py-0.5 rounded-md animate-pulse">
+                Over API Limit
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Error Alert Banner */}
+        {searchError && (
+          <div className="p-4 rounded-2xl bg-rose-950/40 border border-rose-500/40 text-rose-200 flex items-start justify-between gap-3 animate-in fade-in">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <h4 className="text-sm font-semibold text-rose-300">Search Error</h4>
+                <p className="text-xs text-rose-200/90 leading-relaxed font-mono">{searchError}</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSearchError(null)}
+              className="p-1 rounded-lg text-rose-400 hover:text-rose-200 hover:bg-rose-900/40 transition-colors"
+              title="Dismiss error"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
 
         {/* Active Scope Filter Indicator */}
         {selectedGroupId !== 'all' && (
@@ -159,7 +262,7 @@ export default function GlobalSearchPage() {
             <button
               onClick={() => {
                 setSelectedGroupId('all');
-                if (query.trim()) {
+                if (query.trim() && !isOverLimit) {
                   handleSearch(undefined, undefined, 'all');
                 }
               }}

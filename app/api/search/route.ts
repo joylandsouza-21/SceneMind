@@ -14,6 +14,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Search query is required' }, { status: 400 });
     }
 
+    const trimmedQuery = query.trim();
+
+    // Google Gemini text-embedding-004 limit is 2,048 tokens (~8,192 chars)
+    const estimatedTokens = Math.ceil(trimmedQuery.length / 4);
+    if (estimatedTokens > 2048) {
+      return NextResponse.json({
+        error: `Search prompt exceeds Google Gemini embedding limit of 2,048 tokens (your query is ~${estimatedTokens} tokens / ${trimmedQuery.length} characters). Please shorten your search prompt.`
+      }, { status: 400 });
+    }
+
     let videoIdFilter: string[] | undefined = undefined;
     if (groupId && groupId !== 'all') {
       const groupVideos = db.getVideos(groupId);
