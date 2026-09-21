@@ -8,10 +8,23 @@ import { timestampVerificationService } from '@/lib/services/timestamp-verificat
 
 export async function POST(req: NextRequest) {
   try {
-    const { query, autoVerify = true, limit = 15 } = await req.json();
+    const { query, autoVerify = true, limit = 15, groupId } = await req.json();
 
     if (!query || typeof query !== 'string' || query.trim() === '') {
       return NextResponse.json({ error: 'Search query is required' }, { status: 400 });
+    }
+
+    let videoIdFilter: string[] | undefined = undefined;
+    if (groupId && groupId !== 'all') {
+      const groupVideos = db.getVideos(groupId);
+      videoIdFilter = groupVideos.map((v) => v.id);
+      if (videoIdFilter.length === 0) {
+        return NextResponse.json({
+          query,
+          count: 0,
+          results: [],
+        });
+      }
     }
 
     const videos = db.getVideos();
@@ -20,8 +33,8 @@ export async function POST(req: NextRequest) {
     // Generate query embedding
     const { embedding: queryEmbedding } = await embeddingService.generateEmbedding(query);
 
-    // Global vector search without videoId filter
-    const matches = await vectorService.search(queryEmbedding, limit, undefined, 0.05);
+    // Vector search with optional videoIdFilter (single, array, or undefined for global)
+    const matches = await vectorService.search(queryEmbedding, limit, videoIdFilter, 0.05);
 
     const maxRawSim = matches.length > 0 ? Math.max(...matches.map((m) => m.similarity)) : 1.0;
     const isLocalScale = maxRawSim < 0.4;
@@ -82,6 +95,8 @@ export async function POST(req: NextRequest) {
           location: match.metadata.location,
           isVerified,
           verificationReason,
+          groupId: video?.groupId,
+          groupName: video?.groupName,
         };
       })
     );
@@ -89,6 +104,7 @@ export async function POST(req: NextRequest) {
     const searchRecord: VideoSearch = {
       id: `search_${uuidv4()}`,
       query,
+      groupId: groupId && groupId !== 'all' ? groupId : undefined,
       resultCount: results.length,
       createdAt: new Date().toISOString(),
     };

@@ -1,75 +1,211 @@
 'use client';
 
-import React, { useEffect, useState, createContext, useContext } from 'react';
+import React, {
+  useEffect,
+  useState,
+  createContext,
+  useContext,
+  useCallback,
+  useRef,
+} from 'react';
 import { usePathname } from 'next/navigation';
+import { PageLoadingSkeleton } from '@/components/LoadingSkeleton';
 
-interface TransitionContextType {
+/* ------------------------------------------------------------------ */
+/* Types & Helpers                                                    */
+/* ------------------------------------------------------------------ */
+interface NavigationContextType {
   isNavigating: boolean;
+  navigatingTo: string | null;
+  targetTitle: string | null;
+  effectivePath: string;
+  startNavigation: (href: string, title?: string) => void;
 }
 
-const TransitionContext = createContext<TransitionContextType>({ isNavigating: false });
+const NavigationContext = createContext<NavigationContextType>({
+  isNavigating: false,
+  navigatingTo: null,
+  targetTitle: null,
+  effectivePath: '/',
+  startNavigation: () => {},
+});
 
+export function useNavigation() {
+  return useContext(NavigationContext);
+}
+
+/** Legacy hook support */
 export function usePageTransition() {
-  return useContext(TransitionContext);
+  const { isNavigating } = useContext(NavigationContext);
+  return { isNavigating };
 }
 
-/**
- * Wraps page content with smooth opacity-only fade transitions on route changes.
- * No translateY — purely opacity to avoid any visual shaking.
- */
-export default function PageTransitionProvider({ children }: { children: React.ReactNode }) {
+export function getRouteTitle(href: string): string {
+  const clean = href.split('?')[0].split('#')[0];
+  if (clean === '/' || clean === '') return 'Dashboard';
+  if (clean.startsWith('/videos/') && clean !== '/videos') return 'Video Analysis';
+  if (clean.startsWith('/videos')) return 'Videos & Upload';
+  if (clean.startsWith('/search')) return 'Global Search';
+  if (clean.startsWith('/analytics')) return 'Cost Analytics';
+  return 'Loading';
+}
+
+/* ------------------------------------------------------------------ */
+/* Navigation Provider                                                */
+/* ------------------------------------------------------------------ */
+export default function NavigationProvider({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const [displayedChildren, setDisplayedChildren] = useState(children);
+  const [navigatingTo, setNavigatingTo] = useState<string | null>(null);
+  const [targetTitle, setTargetTitle] = useState<string | null>(null);
   const [isNavigating, setIsNavigating] = useState(false);
   const [progress, setProgress] = useState(0);
   const [showBar, setShowBar] = useState(false);
-  const [opacity, setOpacity] = useState(1);
+  const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // When pathname changes, trigger a smooth opacity-only transition
-  useEffect(() => {
-    setOpacity(0.4);
+  const clearProgressInterval = () => {
+    if (progressIntervalRef.current) {
+      clearInterval(progressIntervalRef.current);
+      progressIntervalRef.current = null;
+    }
+  };
+
+  const startNavigation = useCallback((href: string, title?: string) => {
+    const cleanHref = href.split('?')[0].split('#')[0];
+
+    // Avoid self-navigation triggering loading state
+    if (cleanHref === pathname) {
+      return;
+    }
+
+    const determinedTitle = title || getRouteTitle(cleanHref);
+    setNavigatingTo(cleanHref);
+    setTargetTitle(determinedTitle);
     setIsNavigating(true);
     setShowBar(true);
-    setProgress(30);
+    setProgress(35);
 
-    let current = 30;
-    const progressInterval = setInterval(() => {
-      current += Math.random() * 12;
-      if (current >= 85) {
-        current = 85;
-        clearInterval(progressInterval);
+    clearProgressInterval();
+    let curr = 35;
+    progressIntervalRef.current = setInterval(() => {
+      curr += Math.random() * 10;
+      if (curr >= 88) {
+        curr = 88;
+        clearProgressInterval();
       }
-      setProgress(current);
-    }, 100);
-
-    const swapTimer = setTimeout(() => {
-      setDisplayedChildren(children);
-      setOpacity(1);
-      setProgress(100);
-      clearInterval(progressInterval);
-
-      setTimeout(() => {
-        setIsNavigating(false);
-        setShowBar(false);
-        setProgress(0);
-      }, 300);
+      setProgress(curr);
     }, 120);
+  }, [pathname]);
+
+  // When pathname changes (navigation completed by Next.js router)
+  useEffect(() => {
+    clearProgressInterval();
+    setProgress(100);
+
+    const timer = setTimeout(() => {
+      setIsNavigating(false);
+      setNavigatingTo(null);
+      setTargetTitle(null);
+      setShowBar(false);
+      setProgress(0);
+    }, 150);
 
     return () => {
-      clearTimeout(swapTimer);
-      clearInterval(progressInterval);
+      clearTimeout(timer);
+      clearProgressInterval();
     };
   }, [pathname]);
 
-  // Update children for same-page data changes (no animation)
+  // Safety fallback: if navigation takes > 8 seconds, recover UI
   useEffect(() => {
-    if (!isNavigating) {
-      setDisplayedChildren(children);
-    }
-  }, [children]);
+    if (!isNavigating) return;
+    const safetyTimer = setTimeout(() => {
+      clearProgressInterval();
+      setIsNavigating(false);
+      setNavigatingTo(null);
+      setTargetTitle(null);
+      setShowBar(false);
+      setProgress(0);
+    }, 8000);
+
+    return () => clearTimeout(safetyTimer);
+  }, [isNavigating]);
+
+  // Global click listener to instantly switch on any internal link click
+  useEffect(() => {
+    const handleGlobalClick = (e: MouseEvent) => {
+      if (
+        e.button !== 0 ||
+        e.defaultPrevented ||
+        e.metaKey ||
+        e.ctrlKey ||
+        e.shiftKey ||
+        e.altKey
+      ) {
+        return;
+      }
+
+      const target = e.target as HTMLElement | null;
+      const anchor = target?.closest('a');
+      if (!anchor) return;
+
+      if (anchor.target && anchor.target !== '_self') return;
+      if (anchor.hasAttribute('download')) return;
+
+      const rawHref = anchor.getAttribute('href');
+      if (
+        !rawHref ||
+        rawHref.startsWith('#') ||
+        rawHref.startsWith('mailto:') ||
+        rawHref.startsWith('tel:') ||
+        rawHref.startsWith('javascript:')
+      ) {
+        return;
+      }
+
+      // Check if internal origin/path
+      if (rawHref.startsWith('/') || rawHref.startsWith(window.location.origin)) {
+        try {
+          const targetUrl = new URL(rawHref, window.location.origin);
+          if (targetUrl.origin === window.location.origin) {
+            const cleanTarget = targetUrl.pathname;
+            if (cleanTarget !== pathname) {
+              startNavigation(cleanTarget, getRouteTitle(cleanTarget));
+            }
+          }
+        } catch {
+          // ignore invalid URLs
+        }
+      }
+    };
+
+    const handlePopState = () => {
+      const targetPath = window.location.pathname;
+      if (targetPath !== pathname) {
+        startNavigation(targetPath, getRouteTitle(targetPath));
+      }
+    };
+
+    document.addEventListener('click', handleGlobalClick, true);
+    window.addEventListener('popstate', handlePopState);
+
+    return () => {
+      document.removeEventListener('click', handleGlobalClick, true);
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [pathname, startNavigation]);
+
+  const effectivePath = navigatingTo || pathname;
 
   return (
-    <TransitionContext.Provider value={{ isNavigating }}>
+    <NavigationContext.Provider
+      value={{
+        isNavigating,
+        navigatingTo,
+        targetTitle,
+        effectivePath,
+        startNavigation,
+      }}
+    >
       {/* Top progress bar */}
       {showBar && (
         <div className="fixed top-0 left-0 right-0 z-[100] pointer-events-none">
@@ -77,22 +213,36 @@ export default function PageTransitionProvider({ children }: { children: React.R
             className="h-[2.5px] bg-gradient-to-r from-blue-500 via-cyan-400 to-blue-500"
             style={{
               width: `${progress}%`,
-              transition: progress === 100 ? 'width 200ms ease-out' : 'width 400ms ease-out',
-              boxShadow: '0 0 12px rgba(59,130,246,0.6)',
+              transition: progress === 100 ? 'width 150ms ease-out' : 'width 300ms ease-out',
+              boxShadow: '0 0 12px rgba(59,130,246,0.8)',
             }}
           />
         </div>
       )}
 
-      {/* Page content — opacity only, no movement */}
-      <div
-        style={{
-          opacity,
-          transition: 'opacity 150ms ease-in-out',
-        }}
-      >
-        {displayedChildren}
+      {children}
+    </NavigationContext.Provider>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Page Transition Content Wrapper                                    */
+/* ------------------------------------------------------------------ */
+export function PageTransitionContent({ children }: { children: React.ReactNode }) {
+  const { isNavigating, navigatingTo, targetTitle } = useNavigation();
+
+  // If navigating to another page, instantly switch out the previous page and show loader
+  if (isNavigating && navigatingTo) {
+    return (
+      <div className="animate-in fade-in duration-150">
+        <PageLoadingSkeleton title={targetTitle || getRouteTitle(navigatingTo)} />
       </div>
-    </TransitionContext.Provider>
+    );
+  }
+
+  return (
+    <div className="animate-in fade-in duration-150">
+      {children}
+    </div>
   );
 }

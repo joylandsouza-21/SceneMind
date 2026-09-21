@@ -1,12 +1,13 @@
 import fs from 'fs';
 import path from 'path';
-import { DatabaseSchema, Video, VideoScene, VideoSearch, VideoClip, ProcessingJob, AiCost, VectorRecord } from './types';
+import { DatabaseSchema, Video, VideoGroup, VideoScene, VideoSearch, VideoClip, ProcessingJob, AiCost, VectorRecord } from './types';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'sheela-store.json');
 
 const defaultData: DatabaseSchema = {
   videos: [],
+  groups: [],
   scenes: [],
   searches: [],
   clips: [],
@@ -37,6 +38,7 @@ class Store {
         const parsed = JSON.parse(raw);
         return {
           videos: parsed.videos || [],
+          groups: parsed.groups || [],
           scenes: parsed.scenes || [],
           searches: parsed.searches || [],
           clips: parsed.clips || [],
@@ -67,9 +69,51 @@ class Store {
     }, 100);
   }
 
+  // --- Group CRUD ---
+  public getGroups(): VideoGroup[] {
+    return [...(this.data.groups || [])].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+  }
+
+  public getGroup(id: string): VideoGroup | undefined {
+    return (this.data.groups || []).find((g) => g.id === id);
+  }
+
+  public upsertGroup(group: VideoGroup): VideoGroup {
+    if (!this.data.groups) this.data.groups = [];
+    const idx = this.data.groups.findIndex((g) => g.id === group.id);
+    if (idx >= 0) {
+      this.data.groups[idx] = { ...group, updatedAt: new Date().toISOString() };
+    } else {
+      this.data.groups.push(group);
+    }
+    this.save();
+    return group;
+  }
+
+  public deleteGroup(id: string): boolean {
+    if (!this.data.groups) return false;
+    const initialLen = this.data.groups.length;
+    this.data.groups = this.data.groups.filter((g) => g.id !== id);
+    // Unlink group from videos
+    for (const v of this.data.videos) {
+      if (v.groupId === id) {
+        delete v.groupId;
+        delete v.groupName;
+      }
+    }
+    this.save();
+    return this.data.groups.length < initialLen;
+  }
+
   // --- Video CRUD ---
-  public getVideos(): Video[] {
-    return [...this.data.videos].sort(
+  public getVideos(groupId?: string): Video[] {
+    let list = [...this.data.videos];
+    if (groupId) {
+      list = list.filter((v) => v.groupId === groupId);
+    }
+    return list.sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
   }
@@ -210,6 +254,13 @@ class Store {
     return job;
   }
 
+  public deleteJob(id: string): boolean {
+    const initialLen = this.data.jobs.length;
+    this.data.jobs = this.data.jobs.filter((j) => j.id !== id);
+    this.save();
+    return this.data.jobs.length < initialLen;
+  }
+
   // --- Costs CRUD ---
   public recordCost(cost: AiCost) {
     this.data.costs.push(cost);
@@ -234,11 +285,15 @@ class Store {
     this.save();
   }
 
-  public getVectors(videoId?: string): VectorRecord[] {
-    if (videoId) {
-      return this.data.vectors.filter((v) => v.videoId === videoId);
+  public getVectors(videoId?: string | string[]): VectorRecord[] {
+    if (!videoId) {
+      return this.data.vectors;
     }
-    return this.data.vectors;
+    if (Array.isArray(videoId)) {
+      const set = new Set(videoId);
+      return this.data.vectors.filter((v) => set.has(v.videoId));
+    }
+    return this.data.vectors.filter((v) => v.videoId === videoId);
   }
 
   public deleteVector(id: string) {

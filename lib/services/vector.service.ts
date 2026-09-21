@@ -33,7 +33,7 @@ export interface IVectorService {
   search(
     queryEmbedding: number[],
     limit?: number,
-    videoIdFilter?: string,
+    videoIdFilter?: string | string[],
     minSimilarity?: number
   ): Promise<VectorSearchResult[]>;
 
@@ -69,7 +69,7 @@ export class EmbeddedVectorService implements IVectorService {
   public async search(
     queryEmbedding: number[],
     limit = 10,
-    videoIdFilter?: string,
+    videoIdFilter?: string | string[],
     minSimilarity = 0.2
   ): Promise<VectorSearchResult[]> {
     const records = db.getVectors(videoIdFilter);

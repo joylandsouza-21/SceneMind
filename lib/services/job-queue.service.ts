@@ -21,10 +21,53 @@ export interface JobEventPayload {
 
 class JobQueueService extends EventEmitter {
   private activeJobs: Set<string> = new Set();
+  private cancelledVideoIds: Set<string> = new Set();
 
   constructor() {
     super();
     this.setMaxListeners(100);
+  }
+
+  public cancelJob(jobIdOrVideoId: string): boolean {
+    let job = db.getJob(jobIdOrVideoId);
+    let videoId = job?.videoId;
+
+    if (!job) {
+      const videoJobs = db.getJobs(jobIdOrVideoId);
+      if (videoJobs.length > 0) {
+        job = videoJobs[0];
+        videoId = jobIdOrVideoId;
+      } else {
+        videoId = jobIdOrVideoId;
+      }
+    }
+
+    if (videoId) {
+      this.cancelledVideoIds.add(videoId);
+      this.activeJobs.delete(videoId);
+    }
+
+    if (job) {
+      this.updateJob(job.id, {
+        status: 'cancelled',
+        currentStep: 'Processing cancelled by user',
+      });
+    }
+
+    if (videoId) {
+      const video = db.getVideo(videoId);
+      if (video && video.status !== 'indexed') {
+        video.status = 'cancelled';
+        video.errorMessage = 'Processing cancelled by user';
+        db.upsertVideo(video);
+      }
+    }
+
+    return true;
+  }
+
+  public isCancelled(videoId: string): boolean {
+    return this.cancelledVideoIds.has(videoId);
   }
 
   public createJob(videoId: string, jobType: JobType, totalSteps = 100): ProcessingJob {
@@ -77,6 +120,11 @@ class JobQueueService extends EventEmitter {
    * Complete End-to-End Pipeline Execution with Idempotency & Resumption
    */
   public async processVideoPipeline(videoId: string, options?: { forceReindex?: boolean }): Promise<void> {
+    if (this.isCancelled(videoId)) {
+      console.log(`[JOB_QUEUE] Video ${videoId} processing was cancelled.`);
+      return;
+    }
+
     if (this.activeJobs.has(videoId)) {
       console.log(`[JOB_QUEUE] Video ${videoId} is already being processed.`);
       return;
@@ -92,6 +140,8 @@ class JobQueueService extends EventEmitter {
     const job = this.createJob(videoId, 'VIDEO_ANALYSIS', 100);
 
     try {
+      if (this.isCancelled(videoId)) return;
+
       console.log(`[VIDEO_ANALYSIS] Starting pipeline for video: ${video.filename} (${video.id})`);
       video.status = 'processing';
       video.processingProgress = 5;
@@ -112,6 +162,8 @@ class JobQueueService extends EventEmitter {
         video.sizeBytes = meta.sizeBytes;
         db.upsertVideo(video);
       }
+
+      if (this.isCancelled(videoId)) return;
 
       // --- STEP 2: Scene Segmentation & Multimodal Analysis ---
       this.updateJob(job.id, { progress: 30, currentStep: 'Analyzing visual scenes with Gemini Video AI' });
@@ -154,6 +206,11 @@ class JobQueueService extends EventEmitter {
       // --- STEP 3: Idempotent Vector Embedding Generation ---
       const totalScenes = scenes.length;
       for (let i = 0; i < totalScenes; i++) {
+        if (this.isCancelled(videoId)) {
+          console.log(`[JOB_QUEUE] Pipeline cancelled during embedding for video ${videoId}`);
+          return;
+        }
+
         const scene = scenes[i];
 
         // Idempotency: Skip embedding generation if valid embedding already exists and not forcing
@@ -175,6 +232,8 @@ class JobQueueService extends EventEmitter {
           videoId,
           sceneId: scene.id,
         });
+
+        if (this.isCancelled(videoId)) return;
 
         const vectorId = await vectorService.upsert({
           sceneId: scene.id,
@@ -206,6 +265,8 @@ class JobQueueService extends EventEmitter {
         db.upsertVideo(video);
       }
 
+      if (this.isCancelled(videoId)) return;
+
       // --- STEP 4: Index Finalization ---
       this.updateJob(job.id, {
         progress: 95,
@@ -234,6 +295,11 @@ class JobQueueService extends EventEmitter {
 
       console.log(`[INDEX_FINALIZATION] Completed successfully for video ${video.id}`);
     } catch (err: any) {
+      if (this.isCancelled(videoId)) {
+        console.log(`[JOB_QUEUE] Pipeline aborted for video ${videoId} due to user cancellation.`);
+        return;
+      }
+
       console.error(`[JOB_QUEUE] Pipeline failed for video ${videoId}:`, err);
       video.status = 'failed';
       video.errorMessage = err.message || 'Unknown processing error';
@@ -246,6 +312,7 @@ class JobQueueService extends EventEmitter {
       });
     } finally {
       this.activeJobs.delete(videoId);
+      this.cancelledVideoIds.delete(videoId);
     }
   }
 

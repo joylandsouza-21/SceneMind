@@ -1,3 +1,12 @@
+export interface VideoGroup {
+  id: string;
+  name: string;
+  description?: string;
+  color?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Video {
   id: string;
   filename: string;
@@ -9,8 +18,10 @@ export interface Video {
   fps: number;
   format: string;
   sizeBytes: number;
-  status: 'pending' | 'processing' | 'indexed' | 'failed';
+  status: 'pending' | 'processing' | 'indexed' | 'failed' | 'cancelled';
   processingProgress: number;
+  groupId?: string;
+  groupName?: string;
   errorMessage?: string;
   createdAt: string;
   updatedAt: string;
@@ -37,6 +48,7 @@ export interface VideoScene {
 export interface VideoSearch {
   id: string;
   videoId?: string;
+  groupId?: string;
   query: string;
   resultCount: number;
   createdAt: string;
@@ -67,7 +79,7 @@ export type JobType =
   | 'INDEX_FINALIZATION'
   | 'CLIP_GENERATION';
 
-export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'retrying';
+export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'retrying';
 
 export interface ProcessingJob {
   id: string;
@@ -117,6 +129,7 @@ export interface VectorRecord {
 
 export interface DatabaseSchema {
   videos: Video[];
+  groups: VideoGroup[];
   scenes: VideoScene[];
   searches: VideoSearch[];
   clips: VideoClip[];

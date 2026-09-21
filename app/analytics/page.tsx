@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import {
   DollarSign,
   Cpu,
@@ -256,6 +256,17 @@ export default function AnalyticsPage() {
     return () => clearInterval(interval);
   }, []);
 
+  const [visibleCount, setVisibleCount] = useState<number>(20);
+  const [isLoadingMore, setIsLoadingMore] = useState<boolean>(false);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setVisibleCount(20);
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = 0;
+    }
+  }, [opsFilter, opsTypeFilter]);
+
   const filteredOps = useMemo(() => {
     if (!data) return [];
     let ops = data.recentOperations;
@@ -273,6 +284,28 @@ export default function AnalyticsPage() {
     }
     return ops;
   }, [data, opsFilter, opsTypeFilter]);
+
+  const displayedOps = useMemo(() => {
+    return filteredOps.slice(0, visibleCount);
+  }, [filteredOps, visibleCount]);
+
+  const hasMore = visibleCount < filteredOps.length;
+
+  const loadMore = () => {
+    if (!hasMore || isLoadingMore) return;
+    setIsLoadingMore(true);
+    setTimeout(() => {
+      setVisibleCount((prev) => Math.min(prev + 20, filteredOps.length));
+      setIsLoadingMore(false);
+    }, 150);
+  };
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+    if (scrollHeight - scrollTop - clientHeight < 80) {
+      loadMore();
+    }
+  };
 
   if (loading) {
     return (
@@ -562,7 +595,16 @@ export default function AnalyticsPage() {
               <Zap className="w-4 h-4 text-amber-400" />
               Recent Operations
             </h2>
-            <span className="text-[11px] text-slate-500">{filteredOps.length} shown</span>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-slate-400 font-mono">
+                Showing {displayedOps.length} of {filteredOps.length}
+              </span>
+              {hasMore && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 font-medium">
+                  Scroll to load more
+                </span>
+              )}
+            </div>
           </div>
           <div className="flex flex-wrap gap-2">
             <div className="relative flex-1 min-w-[180px]">
@@ -594,10 +636,14 @@ export default function AnalyticsPage() {
             No operations recorded yet, or none match current filters.
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div
+            ref={scrollContainerRef}
+            onScroll={handleScroll}
+            className="max-h-[480px] overflow-y-auto overflow-x-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900/40 relative"
+          >
             <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-slate-800/60 text-slate-500 uppercase tracking-wider">
+              <thead className="sticky top-0 z-10 bg-[#0b101b]/98 backdrop-blur-md border-b border-slate-800 text-slate-400 uppercase tracking-wider text-[11px] shadow-sm">
+                <tr>
                   <th className="text-left px-5 py-3 font-medium">Timestamp</th>
                   <th className="text-left px-5 py-3 font-medium">Video</th>
                   <th className="text-left px-5 py-3 font-medium">Type</th>
@@ -609,15 +655,15 @@ export default function AnalyticsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/40">
-                {filteredOps.map((op) => {
+                {displayedOps.map((op) => {
                   const tc = typeColor(op.requestType);
                   const date = new Date(op.createdAt);
                   return (
-                    <tr key={op.id} className="hover:bg-slate-800/20 transition-colors">
+                    <tr key={op.id} className="hover:bg-slate-800/30 transition-colors">
                       <td className="px-5 py-3 text-slate-400 font-mono whitespace-nowrap">
                         {date.toLocaleDateString()} {date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                       </td>
-                      <td className="px-5 py-3 text-slate-200 max-w-[160px] truncate">{op.videoName}</td>
+                      <td className="px-5 py-3 text-slate-200 max-w-[160px] truncate" title={op.videoName}>{op.videoName}</td>
                       <td className="px-5 py-3">
                         <span className={`inline-flex items-center px-2 py-0.5 rounded-md ${tc.bg} ${tc.text} text-[10px] font-semibold`}>
                           {friendlyType(op.requestType)}
@@ -633,6 +679,29 @@ export default function AnalyticsPage() {
                 })}
               </tbody>
             </table>
+
+            {/* Lazy Loading Status / Sentinel */}
+            <div className="p-3.5 border-t border-slate-800/60 bg-slate-950/50 text-center text-xs flex items-center justify-center gap-2">
+              {isLoadingMore ? (
+                <span className="text-blue-400 flex items-center gap-2 font-medium animate-pulse">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-400" />
+                  <span>Loading more operations...</span>
+                </span>
+              ) : hasMore ? (
+                <button
+                  type="button"
+                  onClick={loadMore}
+                  className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                >
+                  <span>Scroll or click to load more</span>
+                  <span className="text-slate-500 font-mono">({filteredOps.length - displayedOps.length} remaining)</span>
+                </button>
+              ) : filteredOps.length > 20 ? (
+                <span className="text-slate-500 text-[11px]">
+                  All {filteredOps.length} operations loaded
+                </span>
+              ) : null}
+            </div>
           </div>
         )}
       </div>

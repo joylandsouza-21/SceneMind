@@ -1,4 +1,5 @@
 import React from 'react';
+import { RefreshCw } from 'lucide-react';
 
 /** Animated skeleton pulse block */
 export function Skeleton({ className = '' }: { className?: string }) {
@@ -7,17 +8,32 @@ export function Skeleton({ className = '' }: { className?: string }) {
   );
 }
 
-/** Full-page loading skeleton used by route loading.tsx files */
+/** Full-page loading skeleton used by route loading.tsx files and navigation transitions */
 export function PageLoadingSkeleton({ title }: { title?: string }) {
   return (
-    <div className="space-y-8 animate-in fade-in duration-200">
-      {/* Header skeleton */}
-      <div className="flex items-center gap-3">
-        <Skeleton className="w-12 h-12 rounded-xl" />
-        <div className="space-y-2">
-          <Skeleton className="w-48 h-7" />
-          <Skeleton className="w-72 h-4" />
+    <div className="space-y-8 animate-in fade-in duration-150">
+      {/* Header skeleton / destination header */}
+      <div className="flex items-center gap-4">
+        <div className="w-12 h-12 rounded-2xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center animate-pulse">
+          <RefreshCw className="w-5 h-5 text-blue-400 animate-spin" />
         </div>
+        {title ? (
+          <div className="space-y-1">
+            <div className="flex items-center gap-3">
+              <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">{title}</h1>
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/25">
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-ping" />
+                Loading view...
+              </span>
+            </div>
+            <p className="text-xs text-slate-400">Switching page and loading components...</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <Skeleton className="w-48 h-7" />
+            <Skeleton className="w-72 h-4" />
+          </div>
+        )}
       </div>
 
       {/* KPI cards skeleton */}

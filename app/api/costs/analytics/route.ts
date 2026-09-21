@@ -138,10 +138,10 @@ export async function GET() {
       .map((t) => ({ ...t, cost: parseFloat(t.cost.toFixed(6)) }))
       .sort((a, b) => a.hour.localeCompare(b.hour));
 
-    // --- Recent Operations (last 100) ---
+    // --- Recent Operations (last 500) ---
     const recentOps = [...allCosts]
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .slice(0, 100)
+      .slice(0, 500)
       .map((c) => ({
         ...c,
         videoName: c.videoId ? (videoMap.get(c.videoId)?.originalName || videoMap.get(c.videoId)?.filename || c.videoId) : 'N/A',
