@@ -152,6 +152,11 @@ export default function IndexExplorerPage({ params }: { params: { id: string } }
             scenes={scenes}
             activeSceneId={selectedScene?.id}
             onSelectScene={handleSelectScene}
+            onSeek={(t) => {
+              if (playerRef.current) {
+                playerRef.current.seekTo(t);
+              }
+            }}
           />
         </div>
       )}

@@ -9,7 +9,8 @@ import {
   Maximize,
   RotateCcw,
   RotateCw,
-  Scissors
+  Scissors,
+  Loader2,
 } from 'lucide-react';
 
 export interface VideoPlayerRef {
@@ -32,7 +33,6 @@ export function formatTime(seconds: number): string {
   const hrs = Math.floor(seconds / 3600);
   const mins = Math.floor((seconds % 3600) / 60);
   const secs = Math.floor(seconds % 60);
-  const ms = Math.floor((seconds % 1) * 10);
   const hh = hrs.toString().padStart(2, '0');
   const mm = mins.toString().padStart(2, '0');
   const ss = secs.toString().padStart(2, '0');
@@ -53,18 +53,43 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isScrubbing, setIsScrubbing] = useState(false);
+  const [scrubTime, setScrubTime] = useState(0);
+  const [isBuffering, setIsBuffering] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
+
+  const applySeek = (seconds: number) => {
+    if (!videoRef.current) return;
+    const clamped = Math.max(0, Math.min(seconds, duration || 99999));
+    videoRef.current.currentTime = clamped;
+    setCurrentTime(clamped);
+    if (onTimeUpdate) onTimeUpdate(clamped);
+
+    // Explicitly start playback when user seeks to a timestamp
+    const playPromise = videoRef.current.play();
+    if (playPromise !== undefined) {
+      playPromise
+        .then(() => {
+          setIsPlaying(true);
+        })
+        .catch(() => {
+          // Handled if browser autoplay policy delays playback
+        });
+    }
+  };
 
   useImperativeHandle(ref, () => ({
     seekTo: (seconds: number) => {
-      if (videoRef.current) {
-        videoRef.current.currentTime = Math.max(0, Math.min(seconds, duration || 99999));
-        videoRef.current.play().catch(() => {});
-        setIsPlaying(true);
-      }
+      applySeek(seconds);
     },
-    play: () => videoRef.current?.play(),
-    pause: () => videoRef.current?.pause(),
+    play: () => {
+      videoRef.current?.play().catch(() => {});
+      setIsPlaying(true);
+    },
+    pause: () => {
+      videoRef.current?.pause();
+      setIsPlaying(false);
+    },
     getCurrentTime: () => videoRef.current?.currentTime || 0,
   }));
 
@@ -73,9 +98,11 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
     if (!video) return;
 
     const handleTime = () => {
-      const time = video.currentTime;
-      setCurrentTime(time);
-      if (onTimeUpdate) onTimeUpdate(time);
+      if (!isScrubbing) {
+        const time = video.currentTime;
+        setCurrentTime(time);
+        if (onTimeUpdate) onTimeUpdate(time);
+      }
     };
 
     const handleLoadedMetadata = () => {
@@ -84,19 +111,52 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
 
     const handlePlay = () => setIsPlaying(true);
     const handlePause = () => setIsPlaying(false);
+    const handleWaiting = () => setIsBuffering(true);
+    const handlePlaying = () => {
+      setIsBuffering(false);
+      setIsPlaying(true);
+    };
+    const handleSeeking = () => setIsBuffering(true);
+    const handleSeeked = () => setIsBuffering(false);
+    const handleCanPlay = () => setIsBuffering(false);
+    const handleCanPlayThrough = () => setIsBuffering(false);
+    const handleLoadedData = () => setIsBuffering(false);
 
     video.addEventListener('timeupdate', handleTime);
     video.addEventListener('loadedmetadata', handleLoadedMetadata);
     video.addEventListener('play', handlePlay);
     video.addEventListener('pause', handlePause);
+    video.addEventListener('waiting', handleWaiting);
+    video.addEventListener('playing', handlePlaying);
+    video.addEventListener('seeking', handleSeeking);
+    video.addEventListener('seeked', handleSeeked);
+    video.addEventListener('canplay', handleCanPlay);
+    video.addEventListener('canplaythrough', handleCanPlayThrough);
+    video.addEventListener('loadeddata', handleLoadedData);
 
     return () => {
       video.removeEventListener('timeupdate', handleTime);
       video.removeEventListener('loadedmetadata', handleLoadedMetadata);
       video.removeEventListener('play', handlePlay);
       video.removeEventListener('pause', handlePause);
+      video.removeEventListener('waiting', handleWaiting);
+      video.removeEventListener('playing', handlePlaying);
+      video.removeEventListener('seeking', handleSeeking);
+      video.removeEventListener('seeked', handleSeeked);
+      video.removeEventListener('canplay', handleCanPlay);
+      video.removeEventListener('canplaythrough', handleCanPlayThrough);
+      video.removeEventListener('loadeddata', handleLoadedData);
     };
-  }, [onTimeUpdate]);
+  }, [onTimeUpdate, isScrubbing]);
+
+  // Safety fallback: Never let buffering state get stuck
+  useEffect(() => {
+    if (!isBuffering) return;
+    const timer = setTimeout(() => {
+      setIsBuffering(false);
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [isBuffering]);
 
   const togglePlay = () => {
     if (!videoRef.current) return;
@@ -107,11 +167,24 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
     }
   };
 
-  const handleScrub = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePointerDown = () => {
+    setIsScrubbing(true);
+    setScrubTime(currentTime);
+  };
+
+  const handleScrubChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = parseFloat(e.target.value);
-    setCurrentTime(val);
-    if (videoRef.current) {
-      videoRef.current.currentTime = val;
+    setScrubTime(val);
+    if (!isScrubbing) {
+      // Direct click on slider without drag
+      applySeek(val);
+    }
+  };
+
+  const handlePointerUp = () => {
+    if (isScrubbing) {
+      setIsScrubbing(false);
+      applySeek(scrubTime);
     }
   };
 
@@ -133,7 +206,8 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
 
   const skipSeconds = (seconds: number) => {
     if (!videoRef.current) return;
-    videoRef.current.currentTime = Math.max(0, Math.min(videoRef.current.currentTime + seconds, duration));
+    const target = Math.max(0, Math.min(videoRef.current.currentTime + seconds, duration || 99999));
+    applySeek(target);
   };
 
   const toggleFullscreen = () => {
@@ -147,7 +221,7 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
     }
   };
 
-  const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const displayTime = isScrubbing ? scrubTime : currentTime;
 
   return (
     <div
@@ -163,8 +237,15 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
         playsInline
       />
 
+      {/* Buffering Spinner */}
+      {isBuffering && (
+        <div className="absolute inset-0 m-auto w-16 h-16 rounded-full bg-black/70 backdrop-blur-sm border border-blue-500/30 flex items-center justify-center shadow-2xl z-20 pointer-events-none">
+          <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+        </div>
+      )}
+
       {/* Center Big Play Button overlay on pause */}
-      {!isPlaying && (
+      {!isPlaying && !isBuffering && (
         <button
           onClick={togglePlay}
           className="absolute inset-0 m-auto w-16 h-16 rounded-full bg-blue-600/80 hover:bg-blue-600 text-white flex items-center justify-center shadow-xl backdrop-blur-sm transition-transform hover:scale-110 active:scale-95 z-20"
@@ -190,8 +271,15 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
             min={0}
             max={duration || 100}
             step={0.1}
-            value={currentTime}
-            onChange={handleScrub}
+            value={displayTime}
+            onPointerDown={handlePointerDown}
+            onChange={handleScrubChange}
+            onPointerUp={handlePointerUp}
+            onKeyUp={(e) => {
+              if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                applySeek(parseFloat((e.target as HTMLInputElement).value));
+              }
+            }}
             className="w-full h-1.5 bg-slate-700/80 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:h-2 transition-all"
           />
 
@@ -236,7 +324,7 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
 
             {/* Time display */}
             <div className="text-xs font-mono text-slate-300">
-              <span className="text-blue-400 font-semibold">{formatTime(currentTime)}</span>
+              <span className="text-blue-400 font-semibold">{formatTime(displayTime)}</span>
               <span className="text-slate-500 mx-1.5">/</span>
               <span>{formatTime(duration)}</span>
             </div>

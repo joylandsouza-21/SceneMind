@@ -20,13 +20,10 @@ import {
 import { formatTime } from '@/components/VideoPlayer';
 
 export default function TestingPage() {
-  const [activeTab, setActiveTab] = useState<number>(1);
+  const [activeTab, setActiveTab] = useState<number>(2);
   const [videos, setVideos] = useState<any[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState<string>('');
 
-  // Test 1: Video Upload & Metadata State
-  const [test1Status, setTest1Status] = useState<any>(null);
-  const [test1Running, setTest1Running] = useState(false);
 
   // Test 2: AI Description State
   const [test2Status, setTest2Status] = useState<any>(null);
@@ -68,24 +65,7 @@ export default function TestingPage() {
       .catch(console.error);
   }, []);
 
-  // --- Run Test 1: Video Upload / Seed Verification ---
-  const runTest1 = async () => {
-    setTest1Running(true);
-    setTest1Status(null);
-    try {
-      const res = await fetch('/api/demo/seed', { method: 'POST' });
-      const data = await res.json();
-      setTest1Status({
-        success: res.ok,
-        data,
-      });
-      if (data.video?.id) setSelectedVideoId(data.video.id);
-    } catch (e: any) {
-      setTest1Status({ success: false, error: e.message });
-    } finally {
-      setTest1Running(false);
-    }
-  };
+
 
   // --- Run Test 2: AI Description & JSON Extraction ---
   const runTest2 = async () => {
@@ -254,7 +234,7 @@ export default function TestingPage() {
   };
 
   const tabs = [
-    { id: 1, name: 'Test 1: Video Ingest', icon: Upload },
+
     { id: 2, name: 'Test 2: AI Description', icon: Cpu },
     { id: 3, name: 'Test 3: Embeddings', icon: Layers },
     { id: 4, name: 'Test 4: Semantic Search', icon: Search },
@@ -319,44 +299,6 @@ export default function TestingPage() {
 
       {/* Tab Panels */}
       <div className="glass-panel p-6 rounded-3xl border border-slate-800">
-        {/* TEST 1: Video Upload / Ingestion */}
-        {activeTab === 1 && (
-          <div className="space-y-5">
-            <div>
-              <h3 className="text-base font-bold text-white">Test 1 — Video Ingestion & Metadata Probing</h3>
-              <p className="text-xs text-slate-400 mt-0.5">
-                Verifies video file creation, storage key generation, FFprobe metadata extraction (resolution, duration, FPS), and job queuing.
-              </p>
-            </div>
-
-            <button
-              onClick={runTest1}
-              disabled={test1Running}
-              className="flex items-center space-x-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-xl shadow-md transition-all disabled:opacity-50"
-            >
-              <Play className="w-3.5 h-3.5 fill-current" />
-              <span>{test1Running ? 'Generating & Ingesting...' : 'Run Test 1 (Generate Synthetic Video)'}</span>
-            </button>
-
-            {test1Status && (
-              <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3 font-mono text-xs">
-                <div className="flex items-center space-x-2">
-                  {test1Status.success ? (
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                  ) : (
-                    <XCircle className="w-4 h-4 text-red-400" />
-                  )}
-                  <span className={test1Status.success ? 'text-emerald-400 font-bold' : 'text-red-400'}>
-                    {test1Status.success ? 'PASSED: Video Ingested Successfully' : 'FAILED'}
-                  </span>
-                </div>
-                <pre className="text-slate-300 overflow-x-auto p-3 bg-black/50 rounded-xl">
-                  {JSON.stringify(test1Status.data, null, 2)}
-                </pre>
-              </div>
-            )}
-          </div>
-        )}
 
         {/* TEST 2: AI Description */}
         {activeTab === 2 && (

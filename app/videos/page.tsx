@@ -313,7 +313,7 @@ export default function VideosPage() {
             <Film className="w-12 h-12 text-slate-600 mx-auto" />
             <h4 className="text-slate-300 font-semibold">No indexed videos</h4>
             <p className="text-xs text-slate-500 max-w-sm mx-auto">
-              Upload a video above or generate a multi-scene demo video using the top right navbar button.
+              Upload a video above to start indexing with AI-powered scene analysis.
             </p>
           </div>
         ) : (

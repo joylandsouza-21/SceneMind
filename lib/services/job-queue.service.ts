@@ -121,6 +121,7 @@ class JobQueueService extends EventEmitter {
       if (scenes.length === 0 || options?.forceReindex) {
         const analysis = await videoAnalysisService.analyzeVideo(absPath, video.duration, {
           videoId,
+          videoTitle: video.filename || video.originalName,
           minDuration: 6,
           maxDuration: 120,
         });

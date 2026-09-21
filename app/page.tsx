@@ -217,7 +217,7 @@ export default function DashboardPage() {
               <div>
                 <h4 className="text-slate-300 font-medium">No videos uploaded yet</h4>
                 <p className="text-xs text-slate-500 mt-1">
-                  Upload a video or click "Seed Demo Video" in the navbar to test immediately.
+                  Upload a video to get started with AI-powered indexing and semantic search.
                 </p>
               </div>
               <Link

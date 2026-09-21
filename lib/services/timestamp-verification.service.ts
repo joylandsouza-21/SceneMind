@@ -19,7 +19,7 @@ export class TimestampVerificationService {
 
   constructor() {
     const apiKey = process.env.GEMINI_API_KEY;
-    this.modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+    this.modelName = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
     if (apiKey && apiKey.trim() !== '') {
       this.genAI = new GoogleGenerativeAI(apiKey);
     }

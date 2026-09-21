@@ -1,7 +1,9 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleAIFileManager } from '@google/generative-ai/server';
 import { VIDEO_ANALYSIS_SYSTEM_PROMPT, buildVideoAnalysisUserPrompt } from '../../prompts/video-analysis';
 import { pricingService } from './pricing.service';
 import fs from 'fs';
+import path from 'path';
 
 export interface RawDetectedScene {
   startTime: number;
@@ -27,13 +29,15 @@ export interface VideoAnalysisResult {
 
 export class VideoAnalysisService {
   private genAI: GoogleGenerativeAI | null = null;
+  private fileManager: GoogleAIFileManager | null = null;
   private modelName: string;
 
   constructor() {
     const apiKey = process.env.GEMINI_API_KEY;
-    this.modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+    this.modelName = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
     if (apiKey && apiKey.trim() !== '') {
       this.genAI = new GoogleGenerativeAI(apiKey);
+      this.fileManager = new GoogleAIFileManager(apiKey);
     }
   }
 
@@ -45,6 +49,7 @@ export class VideoAnalysisService {
       maxDuration?: number;
       samplingInterval?: number;
       videoId?: string;
+      videoTitle?: string;
     }
   ): Promise<VideoAnalysisResult> {
     const startTime = Date.now();
@@ -54,7 +59,14 @@ export class VideoAnalysisService {
     // If Gemini API Key is present, attempt live AI analysis
     // If it fails, we throw — callers must handle this and mark the video as failed.
     if (this.genAI) {
-      const result = await this.executeGeminiVideoAnalysis(videoPath, durationSeconds, minDur, maxDur, options?.videoId);
+      const result = await this.executeGeminiVideoAnalysis(
+        videoPath,
+        durationSeconds,
+        minDur,
+        maxDur,
+        options?.videoId,
+        options?.videoTitle
+      );
       return result;
     }
 
@@ -70,7 +82,8 @@ export class VideoAnalysisService {
     durationSeconds: number,
     minDur: number,
     maxDur: number,
-    videoId?: string
+    videoId?: string,
+    videoTitle?: string
   ): Promise<VideoAnalysisResult> {
     const startTime = Date.now();
     const model = this.genAI!.getGenerativeModel({
@@ -82,29 +95,77 @@ export class VideoAnalysisService {
       },
     });
 
-    const userPrompt = buildVideoAnalysisUserPrompt(durationSeconds, { minDuration: minDur, maxDuration: maxDur });
+    const userPrompt = buildVideoAnalysisUserPrompt(durationSeconds, {
+      minDuration: minDur,
+      maxDuration: maxDur,
+      videoTitle,
+    });
 
-    // Read video sample buffer (up to 20MB inline) or file reference
-    let promptParts: any[] = [userPrompt];
+    let uploadedFile: any = null;
+    let promptParts: any[] = [];
 
-    try {
-      const stats = fs.statSync(videoPath);
-      if (stats.size <= 20 * 1024 * 1024) {
-        const fileBuffer = fs.readFileSync(videoPath);
-        promptParts.push({
-          inlineData: {
-            data: fileBuffer.toString('base64'),
-            mimeType: 'video/mp4',
-          },
+    // Use Gemini File API to upload the actual video file so Gemini sees the real frames
+    if (this.fileManager && fs.existsSync(videoPath)) {
+      try {
+        console.log(`[VIDEO_ANALYSIS] Uploading video to Gemini File API: ${path.basename(videoPath)}...`);
+        const uploadResult = await this.fileManager.uploadFile(videoPath, {
+          mimeType: 'video/mp4',
+          displayName: path.basename(videoPath),
         });
+
+        let file = await this.fileManager.getFile(uploadResult.file.name);
+        while (file.state === 'PROCESSING') {
+          console.log('[VIDEO_ANALYSIS] Waiting for Gemini video processing...');
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+          file = await this.fileManager.getFile(uploadResult.file.name);
+        }
+
+        if (file.state === 'ACTIVE') {
+          console.log(`[VIDEO_ANALYSIS] Video ready in Gemini File API. Performing multimodal scene analysis...`);
+          uploadedFile = file;
+          promptParts.push({
+            fileData: {
+              fileUri: file.uri,
+              mimeType: file.mimeType,
+            },
+          });
+        } else {
+          console.warn(`[VIDEO_ANALYSIS] Video state is ${file.state}, proceeding with fallback.`);
+        }
+      } catch (err: any) {
+        console.warn(`[VIDEO_ANALYSIS] Gemini File API upload failed: ${err.message}. Trying inline base64 if under 20MB.`);
+        try {
+          const stats = fs.statSync(videoPath);
+          if (stats.size <= 20 * 1024 * 1024) {
+            const fileBuffer = fs.readFileSync(videoPath);
+            promptParts.push({
+              inlineData: {
+                data: fileBuffer.toString('base64'),
+                mimeType: 'video/mp4',
+              },
+            });
+          }
+        } catch {
+          // Ignore
+        }
       }
-    } catch (e) {
-      console.warn('Could not attach full video buffer to prompt; proceeding with temporal frame description');
     }
+
+    promptParts.push(userPrompt);
 
     const response = await model.generateContent(promptParts);
     const text = response.response.text();
     const latencyMs = Date.now() - startTime;
+
+    // Clean up temporary Gemini uploaded file to avoid leaving artifacts on Google cloud
+    if (uploadedFile && this.fileManager) {
+      try {
+        await this.fileManager.deleteFile(uploadedFile.name);
+        console.log(`[VIDEO_ANALYSIS] Cleaned up temporary Gemini file: ${uploadedFile.name}`);
+      } catch {
+        // Silently ignore cleanup errors
+      }
+    }
 
     // Parse and validate strict JSON
     const parsedScenes = this.parseAndValidateScenesJson(text, durationSeconds);

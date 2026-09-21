@@ -42,12 +42,14 @@ JSON SCHEMA:
 }
 `.trim();
 
-export function buildVideoAnalysisUserPrompt(durationSeconds: number, options?: { samplingInterval?: number; minDuration?: number; maxDuration?: number }) {
+export function buildVideoAnalysisUserPrompt(durationSeconds: number, options?: { samplingInterval?: number; minDuration?: number; maxDuration?: number; videoTitle?: string }) {
   const minDur = options?.minDuration ?? 5;
   const maxDur = options?.maxDuration ?? 180;
+  const titleHint = options?.videoTitle ? `\nVideo Title / Source: "${options.videoTitle}"\n` : '';
   return `
-Analyze this video of approximately ${Math.round(durationSeconds)} seconds.
+Analyze this video of approximately ${Math.round(durationSeconds)} seconds.${titleHint}
 Extract all continuous scenes respecting a minimum duration of ${minDur}s and maximum of ${maxDur}s.
+Identify what is actually depicted in the video: characters, visual action, environment, movements, and key events.
 Return strict JSON with the "scenes" array.
 `.trim();
 }

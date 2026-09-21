@@ -258,6 +258,11 @@ export default function VideoDetailPage({ params }: { params: { id: string } }) 
           scenes={scenes}
           activeSceneId={activeScene?.id}
           onSelectScene={handleSeekScene}
+          onSeek={(t) => {
+            if (playerRef.current) {
+              playerRef.current.seekTo(t);
+            }
+          }}
         />
       </div>
 
