@@ -1,5 +1,5 @@
 /**
- * Comprehensive Automated End-to-End Test Suite for Sheela AI
+ * Comprehensive Automated End-to-End Test Suite for SceneMind AI
  * Tests:
  * 1. Storage & safe path verification
  * 2. FFmpeg & FFprobe metadata extraction

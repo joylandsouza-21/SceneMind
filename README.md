@@ -68,7 +68,7 @@ SceneMind AI is a complete, production-ready web application for **AI-powered vi
 - **AI Models**: Google Gemini 2.5 Flash / Pro (`@google/generative-ai`), Gemini Text Embeddings (`text-embedding-004`), with high-fidelity deterministic offline AI simulator when running keyless or in demo mode.
 - **Video & Media Processing**: FFmpeg 8.1 and FFprobe for duration/resolution/codec inspection, scene poster extraction, and asynchronous clip cutting.
 - **Vector Database**: Abstracted `VectorService` supporting zero-dependency Embedded Cosine Index and Pinecone.
-- **Database**: Relational, transactional persistent store (`data/sheela-store.json`) with atomic synchronization.
+- **Database**: Relational, transactional persistent store (`data/scenemind-store.json`) with atomic synchronization.
 
 ---
 

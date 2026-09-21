@@ -1,0 +1,14 @@
+node_modules
+.next
+.git
+.gitignore
+storage
+data/*.json.bak*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.env.local
+.env*.local
+README*.md
+.vscode
+.idea

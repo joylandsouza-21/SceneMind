@@ -3,7 +3,7 @@ import path from 'path';
 import { DatabaseSchema, Video, VideoGroup, VideoScene, VideoSearch, VideoClip, ProcessingJob, AiCost, VectorRecord } from './types';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
-const DB_FILE = path.join(DATA_DIR, 'sheela-store.json');
+const DB_FILE = path.join(DATA_DIR, 'scenemind-store.json');
 
 const defaultData: DatabaseSchema = {
   videos: [],
@@ -33,6 +33,18 @@ class Store {
 
   private loadData(): DatabaseSchema {
     try {
+      // Auto-migrate from any legacy store file if DB_FILE is not present
+      if (!fs.existsSync(DB_FILE) && fs.existsSync(DATA_DIR)) {
+        const existingStores = fs.readdirSync(DATA_DIR).filter(f => f.endsWith('-store.json') && f !== 'scenemind-store.json');
+        if (existingStores.length > 0) {
+          try {
+            fs.copyFileSync(path.join(DATA_DIR, existingStores[0]), DB_FILE);
+          } catch {
+            // fallback silently
+          }
+        }
+      }
+
       if (fs.existsSync(DB_FILE)) {
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
