@@ -57,20 +57,38 @@ export async function POST(req: NextRequest) {
 
     db.upsertVideo(video);
 
-    // Launch background pipeline asynchronously (do not block the upload response)
+    // Run the indexing pipeline synchronously so we can roll back on failure
     const autoIndex = formData.get('autoIndex') !== 'false';
     if (autoIndex) {
-      setTimeout(() => {
-        jobQueueService.processVideoPipeline(videoId).catch((err) => {
-          console.error(`Background pipeline failed for ${videoId}:`, err);
-        });
-      }, 50);
+      try {
+        await jobQueueService.processVideoPipeline(videoId);
+
+        // Confirm it finished successfully (pipeline catches its own errors internally)
+        const finalVideo = db.getVideo(videoId);
+        if (finalVideo?.status === 'failed') {
+          // Clean up — delete file and DB record
+          await storageService.deleteFile(storageKey);
+          db.deleteVideo(videoId);
+          const errMsg = finalVideo.errorMessage || 'AI analysis failed. Check your Gemini API key or try again later.';
+          return NextResponse.json({ error: errMsg }, { status: 500 });
+        }
+      } catch (pipelineErr: any) {
+        // Clean up — delete file and DB record
+        await storageService.deleteFile(storageKey).catch(() => {});
+        db.deleteVideo(videoId);
+        console.error(`[UPLOAD] Pipeline failed for ${videoId}:`, pipelineErr);
+        return NextResponse.json(
+          { error: pipelineErr.message || 'Video processing failed. Please try again.' },
+          { status: 500 }
+        );
+      }
     }
 
+    const finalVideo = db.getVideo(videoId) || video;
     return NextResponse.json({
       success: true,
-      video,
-      message: 'Video uploaded successfully and queued for indexing.',
+      video: finalVideo,
+      message: 'Video uploaded and indexed successfully.',
     });
   } catch (err: any) {
     console.error('Upload route error:', err);

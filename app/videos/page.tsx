@@ -341,10 +341,12 @@ export default function VideosPage() {
                             ? 'bg-emerald-500/80 text-white'
                             : video.status === 'processing'
                             ? 'bg-amber-500/80 text-white animate-pulse'
+                            : video.status === 'failed'
+                            ? 'bg-red-600/90 text-white'
                             : 'bg-slate-800/80 text-slate-300'
                         }`}
                       >
-                        {video.status}
+                        {video.status === 'failed' ? '✕ Failed' : video.status}
                       </span>
                     </div>
                     <div className="absolute bottom-3 right-3 px-2 py-0.5 rounded bg-black/80 text-xs font-mono text-slate-200 backdrop-blur-sm">
@@ -383,27 +385,46 @@ export default function VideosPage() {
                         </div>
                       </div>
                     )}
+
+                    {video.status === 'failed' && (
+                      <div className="flex items-start gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30">
+                        <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                        <div className="space-y-0.5">
+                          <p className="text-[11px] font-semibold text-red-400">AI Analysis Failed</p>
+                          <p className="text-[10px] text-red-300/80 line-clamp-2">
+                            {video.errorMessage || 'Gemini API call failed. Check your API key or try again later.'}
+                          </p>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
 
                 {/* Card Actions */}
                 <div className="px-5 py-3.5 border-t border-slate-800/80 bg-slate-900/50 flex items-center justify-between gap-2">
                   <div className="flex items-center space-x-2">
-                    <Link
-                      href={`/videos/${video.id}`}
-                      className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white text-xs font-semibold border border-blue-500/30 transition-all"
-                    >
-                      <Play className="w-3.5 h-3.5" />
-                      <span>Studio</span>
-                    </Link>
+                    {video.status !== 'failed' && (
+                      <>
+                        <Link
+                          href={`/videos/${video.id}`}
+                          className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white text-xs font-semibold border border-blue-500/30 transition-all"
+                        >
+                          <Play className="w-3.5 h-3.5" />
+                          <span>Studio</span>
+                        </Link>
 
-                    <Link
-                      href={`/videos/${video.id}/search`}
-                      className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600 text-indigo-400 hover:text-white text-xs font-semibold border border-indigo-500/30 transition-all"
-                    >
-                      <Search className="w-3.5 h-3.5" />
-                      <span>Search</span>
-                    </Link>
+                        <Link
+                          href={`/videos/${video.id}/search`}
+                          className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600 text-indigo-400 hover:text-white text-xs font-semibold border border-indigo-500/30 transition-all"
+                        >
+                          <Search className="w-3.5 h-3.5" />
+                          <span>Search</span>
+                        </Link>
+                      </>
+                    )}
+                    {video.status === 'failed' && (
+                      <span className="text-[11px] text-red-400/70 italic">Delete and re-upload to retry</span>
+                    )}
                   </div>
 
                   <button

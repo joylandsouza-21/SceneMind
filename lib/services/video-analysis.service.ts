@@ -52,16 +52,14 @@ export class VideoAnalysisService {
     const maxDur = options?.maxDuration ?? 120;
 
     // If Gemini API Key is present, attempt live AI analysis
+    // If it fails, we throw — callers must handle this and mark the video as failed.
     if (this.genAI) {
-      try {
-        const result = await this.executeGeminiVideoAnalysis(videoPath, durationSeconds, minDur, maxDur, options?.videoId);
-        return result;
-      } catch (err: any) {
-        console.warn(`Gemini AI video analysis failed: ${err.message}. Falling back to high-fidelity structured video intelligence engine.`);
-      }
+      const result = await this.executeGeminiVideoAnalysis(videoPath, durationSeconds, minDur, maxDur, options?.videoId);
+      return result;
     }
 
-    // Intelligent Video Segmentation Engine (Offline / Demo / Keyless Mode)
+    // No API key — Keyless / Demo mode: use the intelligent simulator
+    console.info('[VIDEO_ANALYSIS] No Gemini API key configured. Running in demo/simulator mode.');
     const result = this.simulateIntelligentSceneSegmentation(durationSeconds, minDur, maxDur, options?.videoId);
     result.latencyMs = Date.now() - startTime;
     return result;
