@@ -26,6 +26,7 @@ interface VideoPlayerProps {
   onTimeUpdate?: (currentTime: number) => void;
   activeSceneRange?: { start: number; end: number } | null;
   onRequestClip?: (currentTime: number) => void;
+  initialTime?: number;
 }
 
 export function formatTime(seconds: number): string {
@@ -45,6 +46,7 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
   onTimeUpdate,
   activeSceneRange,
   onRequestClip,
+  initialTime,
 }, ref) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -55,12 +57,41 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [scrubTime, setScrubTime] = useState(0);
-  const [isBuffering, setIsBuffering] = useState(false);
+  const [seekingTargetTime, setSeekingTargetTime] = useState<number | null>(
+    initialTime !== undefined && initialTime > 0 ? initialTime : null
+  );
+  const [isBuffering, setIsBuffering] = useState(
+    initialTime !== undefined && initialTime > 0
+  );
   const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // Auto-seek to initialTime if supplied once video metadata is ready
+  useEffect(() => {
+    if (initialTime !== undefined && initialTime > 0) {
+      setSeekingTargetTime(initialTime);
+      setIsBuffering(true);
+      const video = videoRef.current;
+      if (!video) return;
+
+      const performSeek = () => {
+        applySeek(initialTime);
+      };
+
+      if (video.readyState >= 1) {
+        performSeek();
+      } else {
+        video.addEventListener('loadedmetadata', performSeek, { once: true });
+        return () => video.removeEventListener('loadedmetadata', performSeek);
+      }
+    }
+  }, [initialTime, src]);
 
   const applySeek = (seconds: number) => {
     if (!videoRef.current) return;
     const clamped = Math.max(0, Math.min(seconds, duration || 99999));
+    setSeekingTargetTime(clamped);
+    setIsBuffering(true);
+
     videoRef.current.currentTime = clamped;
     setCurrentTime(clamped);
     if (onTimeUpdate) onTimeUpdate(clamped);
@@ -70,7 +101,7 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
     if (playPromise !== undefined) {
       playPromise
         .then(() => {
-          setIsPlaying(true);
+          // Playback requested
         })
         .catch(() => {
           // Handled if browser autoplay policy delays playback
@@ -102,6 +133,15 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
         const time = video.currentTime;
         setCurrentTime(time);
         if (onTimeUpdate) onTimeUpdate(time);
+
+        // If time is advancing and user was seeking to a target, clear once reached
+        if (seekingTargetTime !== null && !video.paused) {
+          if (time >= seekingTargetTime || Math.abs(time - seekingTargetTime) < 1.0) {
+            setSeekingTargetTime(null);
+            setIsBuffering(false);
+            setIsPlaying(true);
+          }
+        }
       }
     };
 
@@ -114,13 +154,31 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
     const handleWaiting = () => setIsBuffering(true);
     const handlePlaying = () => {
       setIsBuffering(false);
+      setSeekingTargetTime(null);
       setIsPlaying(true);
     };
     const handleSeeking = () => setIsBuffering(true);
-    const handleSeeked = () => setIsBuffering(false);
-    const handleCanPlay = () => setIsBuffering(false);
-    const handleCanPlayThrough = () => setIsBuffering(false);
-    const handleLoadedData = () => setIsBuffering(false);
+    const handleSeeked = () => {
+      if (video.paused && video.readyState >= 2) {
+        setIsBuffering(false);
+        setSeekingTargetTime(null);
+      }
+    };
+    const handleCanPlay = () => {
+      if (seekingTargetTime === null) {
+        setIsBuffering(false);
+      }
+    };
+    const handleCanPlayThrough = () => {
+      if (seekingTargetTime === null) {
+        setIsBuffering(false);
+      }
+    };
+    const handleLoadedData = () => {
+      if (seekingTargetTime === null) {
+        setIsBuffering(false);
+      }
+    };
 
     video.addEventListener('timeupdate', handleTime);
     video.addEventListener('loadedmetadata', handleLoadedMetadata);
@@ -147,44 +205,26 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
       video.removeEventListener('canplaythrough', handleCanPlayThrough);
       video.removeEventListener('loadeddata', handleLoadedData);
     };
-  }, [onTimeUpdate, isScrubbing]);
+  }, [onTimeUpdate, isScrubbing, seekingTargetTime]);
 
   // Safety fallback: Never let buffering state get stuck
   useEffect(() => {
-    if (!isBuffering) return;
+    if (!isBuffering && seekingTargetTime === null) return;
     const timer = setTimeout(() => {
       setIsBuffering(false);
-    }, 2000);
+      setSeekingTargetTime(null);
+    }, 6000);
     return () => clearTimeout(timer);
-  }, [isBuffering]);
+  }, [isBuffering, seekingTargetTime]);
 
   const togglePlay = () => {
     if (!videoRef.current) return;
     if (isPlaying) {
       videoRef.current.pause();
+      setIsPlaying(false);
     } else {
       videoRef.current.play().catch(() => {});
-    }
-  };
-
-  const handlePointerDown = () => {
-    setIsScrubbing(true);
-    setScrubTime(currentTime);
-  };
-
-  const handleScrubChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = parseFloat(e.target.value);
-    setScrubTime(val);
-    if (!isScrubbing) {
-      // Direct click on slider without drag
-      applySeek(val);
-    }
-  };
-
-  const handlePointerUp = () => {
-    if (isScrubbing) {
-      setIsScrubbing(false);
-      applySeek(scrubTime);
+      setIsPlaying(true);
     }
   };
 
@@ -208,6 +248,26 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
     if (!videoRef.current) return;
     const target = Math.max(0, Math.min(videoRef.current.currentTime + seconds, duration || 99999));
     applySeek(target);
+  };
+
+  const handlePointerDown = () => {
+    setIsScrubbing(true);
+    setScrubTime(currentTime);
+  };
+
+  const handleScrubChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseFloat(e.target.value);
+    setScrubTime(val);
+    if (!isScrubbing) {
+      applySeek(val);
+    }
+  };
+
+  const handlePointerUp = () => {
+    if (isScrubbing) {
+      setIsScrubbing(false);
+      applySeek(scrubTime);
+    }
   };
 
   const toggleFullscreen = () => {
@@ -237,15 +297,35 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
         playsInline
       />
 
-      {/* Buffering Spinner */}
-      {isBuffering && (
-        <div className="absolute inset-0 m-auto w-16 h-16 rounded-full bg-black/70 backdrop-blur-sm border border-blue-500/30 flex items-center justify-center shadow-2xl z-20 pointer-events-none">
-          <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+      {/* Buffering & Seeking To Startpoint Overlay */}
+      {(isBuffering || seekingTargetTime !== null) && (
+        <div className="absolute inset-0 bg-black/75 backdrop-blur-[2px] flex flex-col items-center justify-center space-y-3 z-20 pointer-events-none animate-in fade-in duration-150">
+          <div className="relative flex items-center justify-center">
+            <div className="w-14 h-14 rounded-full border-2 border-blue-500/20 border-t-blue-500 animate-spin" />
+            <Play className="w-5 h-5 text-blue-400 absolute fill-current ml-0.5 opacity-80" />
+          </div>
+          <div className="text-center space-y-1">
+            <div className="flex items-center justify-center space-x-2">
+              <Loader2 className="w-3.5 h-3.5 text-blue-400 animate-spin" />
+              <span className="text-xs font-semibold text-white tracking-wide">
+                {seekingTargetTime !== null
+                  ? `Seeking to Clip Start Point (${formatTime(seekingTargetTime)})...`
+                  : 'Buffering Video Stream...'}
+              </span>
+            </div>
+            <p className="text-[11px] font-mono text-slate-400">
+              {seekingTargetTime !== null
+                ? activeSceneRange
+                  ? `Scene Range: ${formatTime(activeSceneRange.start)} → ${formatTime(activeSceneRange.end)}`
+                  : `Positioning playhead to ${formatTime(seekingTargetTime)}`
+                : 'Loading high-definition video chunks'}
+            </p>
+          </div>
         </div>
       )}
 
       {/* Center Big Play Button overlay on pause */}
-      {!isPlaying && !isBuffering && (
+      {!isPlaying && !isBuffering && seekingTargetTime === null && (
         <button
           onClick={togglePlay}
           className="absolute inset-0 m-auto w-16 h-16 rounded-full bg-blue-600/80 hover:bg-blue-600 text-white flex items-center justify-center shadow-xl backdrop-blur-sm transition-transform hover:scale-110 active:scale-95 z-20"

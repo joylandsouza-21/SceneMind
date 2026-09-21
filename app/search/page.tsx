@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import {
   Search,
@@ -15,14 +15,99 @@ import {
   AlertCircle,
   Folder,
   Layers,
-  X
+  X,
+  Tag,
+  RefreshCw,
+  History
 } from 'lucide-react';
 import { formatTime } from '@/components/VideoPlayer';
 import ClipModal from '@/components/ClipModal';
 import GroupSelectDropdown from '@/components/GroupSelectDropdown';
+import SearchHistoryModal, { SearchHistoryItem } from '@/components/SearchHistoryModal';
+import ScenePreviewModal from '@/components/ScenePreviewModal';
 
 const MAX_PROMPT_TOKENS = 2048;
 const MAX_PROMPT_CHARS = 8192;
+
+interface SegmentMatch {
+  segmentId: string;
+  segmentIndex: number;
+  segmentLabel: string;
+  segmentText: string;
+  similarity: number;
+}
+
+interface PromptSegmentItem {
+  id: string;
+  index: number;
+  label: string;
+  text: string;
+  wordCount: number;
+  charCount: number;
+  matchedClipCount: number;
+  matchedClipIds: string[];
+}
+
+const SEGMENT_COLORS = [
+  {
+    bg: 'bg-blue-500/15',
+    activeBg: 'bg-blue-500/25',
+    border: 'border-blue-500/30',
+    activeBorder: 'border-blue-400',
+    text: 'text-blue-300',
+    badge: 'bg-blue-500 text-white',
+    ring: 'ring-blue-500',
+  },
+  {
+    bg: 'bg-emerald-500/15',
+    activeBg: 'bg-emerald-500/25',
+    border: 'border-emerald-500/30',
+    activeBorder: 'border-emerald-400',
+    text: 'text-emerald-300',
+    badge: 'bg-emerald-500 text-white',
+    ring: 'ring-emerald-500',
+  },
+  {
+    bg: 'bg-amber-500/15',
+    activeBg: 'bg-amber-500/25',
+    border: 'border-amber-500/30',
+    activeBorder: 'border-amber-400',
+    text: 'text-amber-300',
+    badge: 'bg-amber-500 text-white',
+    ring: 'ring-amber-500',
+  },
+  {
+    bg: 'bg-purple-500/15',
+    activeBg: 'bg-purple-500/25',
+    border: 'border-purple-500/30',
+    activeBorder: 'border-purple-400',
+    text: 'text-purple-300',
+    badge: 'bg-purple-500 text-white',
+    ring: 'ring-purple-500',
+  },
+  {
+    bg: 'bg-cyan-500/15',
+    activeBg: 'bg-cyan-500/25',
+    border: 'border-cyan-500/30',
+    activeBorder: 'border-cyan-400',
+    text: 'text-cyan-300',
+    badge: 'bg-cyan-500 text-white',
+    ring: 'ring-cyan-500',
+  },
+  {
+    bg: 'bg-rose-500/15',
+    activeBg: 'bg-rose-500/25',
+    border: 'border-rose-500/30',
+    activeBorder: 'border-rose-400',
+    text: 'text-rose-300',
+    badge: 'bg-rose-500 text-white',
+    ring: 'ring-rose-500',
+  },
+];
+
+function getSegmentColor(index: number) {
+  return SEGMENT_COLORS[(index - 1) % SEGMENT_COLORS.length] || SEGMENT_COLORS[0];
+}
 
 export default function GlobalSearchPage() {
   const [query, setQuery] = useState('');
@@ -30,12 +115,28 @@ export default function GlobalSearchPage() {
   const [selectedGroupId, setSelectedGroupId] = useState<string>('all');
   const [isSearching, setIsSearching] = useState(false);
   const [results, setResults] = useState<any[]>([]);
+  const [segments, setSegments] = useState<PromptSegmentItem[]>([]);
+  const [selectedSegmentId, setSelectedSegmentId] = useState<string | 'all'>('all');
   const [hasSearched, setHasSearched] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+
+  // Search History state
+  const [historyModalOpen, setHistoryModalOpen] = useState(false);
+  const [activeHistoryId, setActiveHistoryId] = useState<string | null>(null);
+  const [historyCount, setHistoryCount] = useState<number>(0);
 
   // Clip modal state
   const [clipModalOpen, setClipModalOpen] = useState(false);
   const [activeClipData, setActiveClipData] = useState<any | null>(null);
+
+  // Scene Preview modal state
+  const [previewModalOpen, setPreviewModalOpen] = useState(false);
+  const [previewSceneIndex, setPreviewSceneIndex] = useState(0);
+
+  const handleOpenPreview = (index: number) => {
+    setPreviewSceneIndex(index);
+    setPreviewModalOpen(true);
+  };
 
   // Prompt token & character estimation
   const estimatedTokens = Math.ceil(query.length / 4);
@@ -43,23 +144,36 @@ export default function GlobalSearchPage() {
   const isNearLimit = estimatedTokens > MAX_PROMPT_TOKENS * 0.8 && !isOverLimit;
   const progressPercent = Math.min(100, Math.round((estimatedTokens / MAX_PROMPT_TOKENS) * 100));
 
+  const fetchHistoryCount = () => {
+    fetch('/api/search/history')
+      .then((res) => res.json())
+      .then((data) => setHistoryCount((data.history || []).length))
+      .catch(() => {});
+  };
+
   useEffect(() => {
     fetch('/api/groups')
       .then((res) => res.json())
       .then((data) => setGroups(data.groups || []))
       .catch((err) => console.error('Failed to load groups:', err));
+    fetchHistoryCount();
   }, []);
 
   const samplePrompts = [
+    'Episode scene sequence:\n1. Luffy charges with a red fiery fist.\n2. Kaido roars and swings his giant thunder club.\n3. The sky splits open with lightning.',
     'Find all fight scenes',
     'Find two people arguing',
     'Find red car or driving',
     'Find person walking a dog',
-    'Find scene where someone enters a building',
     'Find conversations in a room',
   ];
 
-  const handleSearch = async (e?: React.FormEvent, customQuery?: string, customGroup?: string) => {
+  const handleSearch = async (
+    e?: React.FormEvent,
+    customQuery?: string,
+    customGroup?: string,
+    forceLive: boolean = true
+  ) => {
     if (e) e.preventDefault();
     const q = customQuery !== undefined ? customQuery : query;
     const g = customGroup !== undefined ? customGroup : selectedGroupId;
@@ -79,6 +193,7 @@ export default function GlobalSearchPage() {
     if (customGroup !== undefined) setSelectedGroupId(customGroup);
     setIsSearching(true);
     setHasSearched(true);
+    setActiveHistoryId(null);
 
     try {
       const res = await fetch('/api/search', {
@@ -89,21 +204,80 @@ export default function GlobalSearchPage() {
           autoVerify: true,
           limit: 20,
           groupId: g !== 'all' ? g : undefined,
+          forceLive,
         }),
       });
 
       const data = await res.json();
       if (res.ok) {
         setResults(data.results || []);
+        setSegments(data.segments || []);
+        setSelectedSegmentId('all');
+        if (data.fromCache && data.searchId) {
+          setActiveHistoryId(data.searchId);
+        }
+        fetchHistoryCount();
       } else {
         setSearchError(data.error || 'Search failed. Please verify API configuration or try again.');
         setResults([]);
+        setSegments([]);
       }
     } catch (err: any) {
       console.error('Global search error:', err);
       setSearchError(err?.message || 'Network error occurred while executing search.');
       setResults([]);
+      setSegments([]);
     } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const handleRestoreSearch = async (searchId: string, historyItem?: SearchHistoryItem) => {
+    setIsSearching(true);
+    setHasSearched(true);
+    setResults([]);
+    setSegments([]);
+    setSearchError(null);
+
+    // Immediately reflect selected query and group in UI
+    if (historyItem) {
+      setQuery(historyItem.query);
+      if (historyItem.groupId) setSelectedGroupId(historyItem.groupId);
+      else setSelectedGroupId('all');
+    }
+
+    try {
+      const res = await fetch(`/api/search/history/${searchId}`);
+      if (!res.ok) {
+        throw new Error(`Failed to load history record (status: ${res.status})`);
+      }
+      const data = await res.json();
+      const s = data.search;
+      if (s) {
+        setQuery(s.query);
+        setSelectedGroupId(s.groupId || 'all');
+        setActiveHistoryId(s.id);
+
+        if (s.results && Array.isArray(s.results) && s.results.length > 0) {
+          // Smooth 200ms loader transition so user clearly sees data populating
+          setTimeout(() => {
+            setResults(s.results);
+            setSegments(s.segments || []);
+            setSelectedSegmentId('all');
+            setHasSearched(true);
+            setIsSearching(false);
+          }, 200);
+        } else {
+          // Older history item without cached results snapshot:
+          // Automatically execute live search so results load for the user!
+          await handleSearch(undefined, s.query, s.groupId || 'all');
+        }
+      } else {
+        throw new Error('Search record empty');
+      }
+    } catch (e: any) {
+      console.error('Error restoring search record:', e);
+      setSearchError('Failed to load saved search results from history. You can click Search to re-run this query.');
       setIsSearching(false);
     }
   };
@@ -114,23 +288,78 @@ export default function GlobalSearchPage() {
   };
 
   const activeGroup = groups.find((g) => g.id === selectedGroupId);
+  const activeSegment = segments.find((s) => s.id === selectedSegmentId);
+
+  // Filtered results based on selected segment
+  const displayedResults = useMemo(() => {
+    if (selectedSegmentId === 'all') return results;
+    return results.filter((r) => r.matchedSegmentIds?.includes(selectedSegmentId));
+  }, [results, selectedSegmentId]);
 
   return (
     <div className="space-y-8 animate-in fade-in">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl sm:text-3xl font-bold text-white flex items-center space-x-3">
-          <Search className="w-6 h-6 text-blue-400" />
-          <span>Cross-Video Semantic Search</span>
-        </h1>
-        <p className="text-slate-400 text-sm mt-1">
-          Search across every indexed video or filter queries inside a specific TV show or episode group.
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-bold text-white flex items-center space-x-3">
+            <Search className="w-6 h-6 text-blue-400" />
+            <span>Cross-Video Semantic Search</span>
+          </h1>
+          <p className="text-slate-400 text-sm mt-1">
+            Search across every indexed video or filter queries inside a specific TV show or episode group.
+          </p>
+        </div>
+
+        {/* Search History Trigger Button */}
+        <button
+          type="button"
+          onClick={() => setHistoryModalOpen(true)}
+          className="flex items-center space-x-2 px-4 py-2.5 rounded-2xl bg-slate-900/90 border border-slate-800 hover:border-slate-700 hover:bg-slate-800 text-slate-200 text-xs font-semibold shadow-sm transition-all shrink-0 self-start sm:self-auto group"
+          title="View previous searches and cached results"
+        >
+          <History className="w-4 h-4 text-blue-400 group-hover:scale-110 transition-transform" />
+          <span>Search History</span>
+          {historyCount > 0 && (
+            <span className="px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-400 text-[10px] font-mono font-bold border border-blue-500/25">
+              {historyCount}
+            </span>
+          )}
+        </button>
       </div>
+
+      {/* Restored History Search Banner */}
+      {activeHistoryId && (
+        <div className="p-3.5 rounded-2xl bg-blue-950/30 border border-blue-500/30 text-xs text-blue-200 flex flex-wrap items-center justify-between gap-2.5 animate-in fade-in">
+          <div className="flex items-center gap-2">
+            <History className="w-4 h-4 text-blue-400 shrink-0" />
+            <span>
+              Viewing <strong>saved search results</strong> from history.
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => handleSearch()}
+              className="px-3 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs transition-colors"
+            >
+              Re-run Live Search
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveHistoryId(null)}
+              className="text-slate-400 hover:text-white p-1 rounded-md"
+              title="Dismiss banner"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
 
       {/* Query Bar & Group Filter */}
       <div className="glass-panel p-6 rounded-3xl border border-slate-800 space-y-4">
-        <form onSubmit={handleSearch} className="flex flex-col sm:flex-row gap-3">
+        <form onSubmit={handleSearch} className="flex flex-col sm:flex-row gap-3 items-start">
           {/* Group Scope Selector */}
           <GroupSelectDropdown
             groups={groups}
@@ -144,25 +373,33 @@ export default function GlobalSearchPage() {
             allLabel="All Shows & Videos"
             allValue="all"
             icon="film"
-            className="shrink-0 min-w-[210px]"
+            className="shrink-0 min-w-[210px] h-[52px]"
           />
 
-          {/* Search Query Input */}
-          <div className="relative flex-1">
-            <Search className="w-5 h-5 text-slate-400 absolute left-4 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
+          {/* Search Query Multi-line Input */}
+          <div className="relative flex-1 w-full sm:w-auto">
+            <Search className="w-5 h-5 text-slate-400 absolute left-4 top-4 pointer-events-none" />
+            <textarea
               value={query}
               onChange={(e) => {
                 setQuery(e.target.value);
                 if (searchError) setSearchError(null);
               }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  if (!isSearching && query.trim() && !isOverLimit) {
+                    handleSearch();
+                  }
+                }
+              }}
+              rows={query.includes('\n') || query.length > 80 ? 4 : 2}
               placeholder={
                 activeGroup
-                  ? `Search inside "${activeGroup.name}" episodes (e.g. "fight scene", "dialogue")...`
-                  : 'Search all videos (e.g. "Find all fight scenes", "two people arguing")...'
+                  ? `Search inside "${activeGroup.name}" episodes (e.g. multi-line prompt, scene descriptions)...`
+                  : 'Search all videos (e.g. paste 7-8 lines of sequence descriptions, or single actions)...'
               }
-              className={`w-full pl-12 pr-4 py-3.5 bg-slate-950/80 border rounded-2xl text-white placeholder-slate-500 text-sm focus:outline-none shadow-inner transition-colors ${
+              className={`w-full pl-12 pr-4 py-3 bg-slate-950/80 border rounded-2xl text-white placeholder-slate-500 text-sm focus:outline-none shadow-inner transition-colors resize-y min-h-[52px] leading-relaxed ${
                 isOverLimit
                   ? 'border-rose-500/80 focus:border-rose-400 focus:ring-1 focus:ring-rose-500/30'
                   : isNearLimit
@@ -172,14 +409,14 @@ export default function GlobalSearchPage() {
             />
           </div>
 
-          {/* Submit Button */}
+          {/* Submit Button - Fixed height so it never stretches with textarea */}
           <button
             type="submit"
             disabled={isSearching || !query.trim() || isOverLimit}
-            className="px-6 py-3.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold text-sm rounded-2xl shadow-lg shadow-blue-500/20 transition-all flex items-center justify-center space-x-2 shrink-0"
+            className="px-6 h-[52px] bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold text-sm rounded-2xl shadow-lg shadow-blue-500/20 transition-all flex items-center justify-center space-x-2 shrink-0 self-stretch sm:self-start"
           >
-            {isSearching ? <span className="animate-spin">🌀</span> : <Search className="w-4 h-4" />}
-            <span>Search</span>
+            {isSearching ? <RefreshCw className="w-4 h-4 animate-spin text-white" /> : <Search className="w-4 h-4" />}
+            <span>{isSearching ? 'Searching...' : 'Search'}</span>
           </button>
         </form>
 
@@ -274,6 +511,37 @@ export default function GlobalSearchPage() {
           </div>
         )}
 
+        {/* Restored Historical Search Banner */}
+        {activeHistoryId && (
+          <div className="flex items-center justify-between gap-3 text-xs text-blue-300 bg-blue-950/40 border border-blue-500/30 rounded-2xl px-4 py-2.5">
+            <div className="flex items-center space-x-2">
+              <History className="w-4 h-4 text-blue-400 shrink-0" />
+              <span>
+                Viewing restored results from <strong>Search History</strong>
+              </span>
+            </div>
+            <div className="flex items-center space-x-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => handleSearch(undefined, query, selectedGroupId, true)}
+                className="px-2.5 py-1 rounded-lg bg-blue-600/80 hover:bg-blue-600 text-white font-semibold transition-colors flex items-center space-x-1"
+                title="Re-run this query live with fresh AI vector search"
+              >
+                <RefreshCw className="w-3 h-3" />
+                <span>Re-run Live</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveHistoryId(null)}
+                className="hover:text-white p-1 rounded-lg hover:bg-blue-900/50 transition-colors"
+                title="Dismiss"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Suggested Prompts */}
         <div className="flex flex-wrap items-center gap-2 pt-1">
           <span className="text-xs text-slate-500 font-medium">Quick queries:</span>
@@ -282,54 +550,249 @@ export default function GlobalSearchPage() {
               key={i}
               type="button"
               onClick={() => handleSearch(undefined, p)}
-              className="px-3 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-xs transition-colors"
+              className="px-3 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-xs transition-colors whitespace-pre-line text-left"
             >
-              "{p}"
+              {p.includes('\n') ? '📺 Multi-line scene sequence...' : `"${p}"`}
             </button>
           ))}
         </div>
       </div>
 
-      {/* Results List */}
+      {/* Interactive Prompt Storyboard & Segment Alignment Panel */}
+      {segments.length > 1 && (
+        <div className="glass-panel p-6 rounded-3xl border border-slate-800 space-y-4 animate-in fade-in">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                <Layers className="w-4 h-4 text-indigo-400" />
+                <span>Prompt Storyboard & Segment Alignment</span>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/30 font-semibold">
+                  {segments.length} Parts Detected
+                </span>
+              </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Each portion of your prompt was analyzed against video scenes. Click any segment below to filter matched clips.
+              </p>
+            </div>
+
+            {selectedSegmentId !== 'all' && (
+              <button
+                type="button"
+                onClick={() => setSelectedSegmentId('all')}
+                className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 font-medium shrink-0 self-start sm:self-auto bg-blue-500/10 px-3 py-1 rounded-lg border border-blue-500/20"
+              >
+                <span>Show All {results.length} Clips</span>
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Storyboard Segment Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+            {/* "All Segments" Card */}
+            <button
+              type="button"
+              onClick={() => setSelectedSegmentId('all')}
+              className={`p-3.5 rounded-2xl border text-left transition-all flex flex-col justify-between space-y-2.5 ${
+                selectedSegmentId === 'all'
+                  ? 'bg-blue-600/15 border-blue-500/50 shadow-lg shadow-blue-500/10 ring-1 ring-blue-500'
+                  : 'bg-slate-900/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-blue-400" />
+                  <span>All Segments</span>
+                </span>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-semibold">
+                  {results.length} clips
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 line-clamp-2">
+                View all retrieved scene candidates matching any part of your prompt.
+              </p>
+              <div className="text-[10px] text-blue-400 pt-1 font-medium">
+                {selectedSegmentId === 'all' ? '● Active' : 'Click to view all'}
+              </div>
+            </button>
+
+            {/* Individual Segment Cards */}
+            {segments.map((seg) => {
+              const isSelected = selectedSegmentId === seg.id;
+              const color = getSegmentColor(seg.index);
+              return (
+                <button
+                  key={seg.id}
+                  type="button"
+                  onClick={() => setSelectedSegmentId(seg.id)}
+                  className={`p-3.5 rounded-2xl border text-left transition-all flex flex-col justify-between space-y-2.5 group ${
+                    isSelected
+                      ? `${color.activeBg} ${color.activeBorder} shadow-lg ring-1 ${color.ring}`
+                      : 'bg-slate-900/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className={`text-xs font-bold flex items-center gap-1.5 ${color.text}`}>
+                      <span className={`w-4 h-4 rounded-full ${color.badge} text-[10px] flex items-center justify-center font-bold`}>
+                        {seg.index}
+                      </span>
+                      <span>{seg.label}</span>
+                    </span>
+                    <span
+                      className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-semibold ${
+                        seg.matchedClipCount > 0
+                          ? `${color.bg} ${color.text} border ${color.border}`
+                          : 'bg-slate-800 text-slate-500'
+                      }`}
+                    >
+                      {seg.matchedClipCount} {seg.matchedClipCount === 1 ? 'clip' : 'clips'}
+                    </span>
+                  </div>
+
+                  <p className={`text-xs leading-relaxed line-clamp-3 ${isSelected ? 'text-white font-medium' : 'text-slate-300'}`}>
+                    "{seg.text}"
+                  </p>
+
+                  <div className="flex items-center justify-between text-[10px] text-slate-500 pt-1">
+                    <span>{seg.wordCount} words</span>
+                    <span className={`font-semibold ${isSelected ? color.text : 'text-blue-400 group-hover:underline'}`}>
+                      {isSelected ? '● Active Filter' : 'Filter clips →'}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Results List Header & Count */}
       <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-bold text-white flex items-center space-x-2">
-            <span>
-              {selectedGroupId !== 'all' && activeGroup
-                ? `Matches in "${activeGroup.name}"`
-                : 'Global Search Matches'}
-            </span>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="flex items-center space-x-2 flex-wrap">
+            <h2 className="text-lg font-bold text-white flex items-center space-x-2">
+              <span>
+                {selectedGroupId !== 'all' && activeGroup
+                  ? `Matches in "${activeGroup.name}"`
+                  : 'Search Matches'}
+              </span>
+            </h2>
+
             {hasSearched && (
               <span className="text-xs text-blue-400 font-normal">
-                ({results.length} scenes found)
+                ({displayedResults.length} {displayedResults.length === 1 ? 'scene' : 'scenes'}
+                {selectedSegmentId !== 'all' && ` matching ${activeSegment?.label}`})
               </span>
             )}
-          </h2>
+
+            {selectedSegmentId !== 'all' && activeSegment && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-500/15 border border-indigo-500/30 text-indigo-300">
+                <span>Filter: {activeSegment.label}</span>
+                <button
+                  onClick={() => setSelectedSegmentId('all')}
+                  className="hover:text-white ml-0.5"
+                  title="Clear segment filter"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            )}
+          </div>
         </div>
 
-        {!hasSearched ? (
+        {isSearching ? (
+          <div className="space-y-6 animate-in fade-in duration-200">
+            {/* Searching status banner */}
+            <div className="glass-panel p-6 rounded-3xl border border-blue-500/30 bg-blue-950/20 flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="flex items-center gap-3.5">
+                <div className="w-10 h-10 rounded-2xl bg-blue-500/15 border border-blue-500/30 flex items-center justify-center shrink-0">
+                  <RefreshCw className="w-5 h-5 text-blue-400 animate-spin" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-semibold text-white flex items-center gap-2">
+                    <span>
+                      {activeHistoryId
+                        ? 'Loading Saved Search Results...'
+                        : 'Searching Video Library with AI...'}
+                    </span>
+                    <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
+                  </h4>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    {activeHistoryId
+                      ? 'Retrieving verified scenes, matched clips, and storyboard alignment from database.'
+                      : 'Generating multimodal vector embeddings and computing similarity across indexed scenes.'}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 text-xs font-mono text-blue-400 bg-blue-500/10 border border-blue-500/20 px-3 py-1.5 rounded-xl shrink-0">
+                <Sparkles className="w-3.5 h-3.5 animate-pulse text-cyan-400" />
+                <span>
+                  {activeHistoryId ? 'Loading Saved Matches' : 'Vector Search in Progress'}
+                </span>
+              </div>
+            </div>
+
+            {/* Skeleton Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div
+                  key={i}
+                  className="glass-panel p-5 rounded-2xl border border-slate-800 space-y-4 animate-pulse"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-2 flex-1">
+                      <div className="h-4 bg-slate-800 rounded-md w-1/3" />
+                      <div className="h-5 bg-slate-800 rounded-md w-1/2" />
+                    </div>
+                    <div className="h-6 bg-slate-800 rounded-full w-20" />
+                  </div>
+                  <div className="space-y-2">
+                    <div className="h-3.5 bg-slate-800/80 rounded w-full" />
+                    <div className="h-3.5 bg-slate-800/80 rounded w-5/6" />
+                    <div className="h-3.5 bg-slate-800/80 rounded w-4/6" />
+                  </div>
+                  <div className="pt-3 border-t border-slate-800/60 flex items-center justify-between">
+                    <div className="h-8 bg-slate-800 rounded-lg w-28" />
+                    <div className="h-8 bg-slate-800 rounded-lg w-28" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : !hasSearched ? (
           <div className="p-12 rounded-3xl bg-slate-900/40 border border-slate-800 text-center space-y-3">
             <Search className="w-10 h-10 text-slate-600 mx-auto" />
             <h4 className="text-slate-300 font-semibold">Search across all videos or a specific TV show</h4>
             <p className="text-xs text-slate-500 max-w-sm mx-auto">
-              Query millions of frames with zero manual tagging. Select a group above to search within a show.
+              Query millions of frames with zero manual tagging. Enter multi-sentence prompts to automatically map clips to story segments.
             </p>
           </div>
-        ) : results.length === 0 ? (
+        ) : displayedResults.length === 0 ? (
           <div className="p-10 rounded-3xl bg-slate-900/40 border border-slate-800 text-center space-y-3">
             <AlertCircle className="w-10 h-10 text-amber-500 mx-auto" />
             <h4 className="text-slate-300 font-semibold">
-              {selectedGroupId !== 'all'
+              {selectedSegmentId !== 'all'
+                ? `No clips matched specifically for ${activeSegment?.label}`
+                : selectedGroupId !== 'all'
                 ? `No scenes matched within "${activeGroup?.name || 'this group'}"`
                 : 'No scenes matched across any video'}
             </h4>
             <p className="text-xs text-slate-500">
-              Try adjusting your query or selecting "All Shows & Videos".
+              {selectedSegmentId !== 'all' ? (
+                <button
+                  onClick={() => setSelectedSegmentId('all')}
+                  className="text-blue-400 hover:underline font-medium"
+                >
+                  Click here to view clips from all segments ({results.length} total)
+                </button>
+              ) : (
+                'Try adjusting your query or selecting "All Shows & Videos".'
+              )}
             </p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-            {results.map((res, index) => {
+            {displayedResults.map((res, index) => {
               const start = res.isVerified ? res.verifiedStartTime : res.startTime;
               const end = res.isVerified ? res.verifiedEndTime : res.endTime;
 
@@ -344,8 +807,9 @@ export default function GlobalSearchPage() {
                       <div className="space-y-1.5 min-w-0">
                         <div className="flex items-center space-x-2 flex-wrap gap-y-1">
                           <Link
-                            href={`/videos/${res.videoId}`}
+                            href={`/videos/${res.videoId}?t=${start}&end=${end}&sceneId=${res.id || ''}`}
                             className="flex items-center space-x-1.5 text-xs text-blue-400 hover:text-blue-300 font-medium group truncate"
+                            title="Open in Studio positioned at this clip"
                           >
                             <Film className="w-3.5 h-3.5 shrink-0" />
                             <span className="truncate max-w-[200px]">{res.videoName}</span>
@@ -360,12 +824,17 @@ export default function GlobalSearchPage() {
                           )}
                         </div>
 
-                        <div className="flex items-center space-x-2 mt-1">
-                          <span className="font-mono text-base font-bold text-white">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenPreview(index)}
+                          className="flex items-center space-x-2 mt-1 hover:text-blue-400 group text-left transition-colors cursor-pointer"
+                          title="Click to preview this scene"
+                        >
+                          <span className="font-mono text-base font-bold text-white group-hover:text-blue-400 transition-colors">
                             {formatTime(start)} → {formatTime(end)}
                           </span>
                           <span className="text-xs text-slate-400 font-mono">({res.duration}s)</span>
-                        </div>
+                        </button>
                       </div>
 
                       <div className="text-right shrink-0">
@@ -384,6 +853,38 @@ export default function GlobalSearchPage() {
                       {res.description}
                     </p>
 
+                    {/* Matched Prompt Segments Alignment Badges */}
+                    {res.segmentMatches && res.segmentMatches.length > 0 && (
+                      <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-1.5">
+                        <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-medium">
+                          <Tag className="w-3 h-3 text-indigo-400" />
+                          <span>Matched Prompt Segments:</span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {res.segmentMatches.map((sm: SegmentMatch) => {
+                            const isSelected = selectedSegmentId === sm.segmentId;
+                            const colorCls = getSegmentColor(sm.segmentIndex);
+                            return (
+                              <button
+                                key={sm.segmentId}
+                                type="button"
+                                onClick={() => setSelectedSegmentId(isSelected ? 'all' : sm.segmentId)}
+                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold transition-all ${
+                                  isSelected
+                                    ? `${colorCls.activeBg} ${colorCls.text} ring-1 ${colorCls.ring} shadow-sm`
+                                    : `${colorCls.bg} ${colorCls.text} hover:opacity-80`
+                                }`}
+                                title={`Click to isolate ${sm.segmentLabel}: "${sm.segmentText}"`}
+                              >
+                                <span>{sm.segmentLabel}</span>
+                                <span className="opacity-75 font-mono">({Math.round(sm.similarity * 100)}%)</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
                     {res.isVerified && res.verificationReason && (
                       <div className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800 text-xs text-slate-400 italic">
                         "{res.verificationReason}"
@@ -392,18 +893,32 @@ export default function GlobalSearchPage() {
                   </div>
 
                   {/* Actions */}
-                  <div className="pt-3 border-t border-slate-800 flex items-center justify-between">
-                    <Link
-                      href={`/videos/${res.videoId}`}
-                      className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-medium transition-colors"
-                    >
-                      <Play className="w-3 h-3" />
-                      <span>Open in Studio</span>
-                    </Link>
+                  <div className="pt-3 border-t border-slate-800 flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenPreview(index)}
+                        className="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md shadow-blue-500/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
+                        title="Preview this scene in popup player without leaving search"
+                      >
+                        <Play className="w-3.5 h-3.5 fill-current" />
+                        <span>Preview Scene</span>
+                      </button>
+
+                      <Link
+                        href={`/videos/${res.videoId}?t=${start}&end=${end}&sceneId=${res.id || ''}`}
+                        className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-medium transition-colors"
+                        title="Open full video studio positioned at this clip"
+                      >
+                        <Film className="w-3 h-3" />
+                        <span>Studio</span>
+                      </Link>
+                    </div>
 
                     <button
+                      type="button"
                       onClick={() => handleOpenClip(res)}
-                      className="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md transition-all"
+                      className="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md transition-all hover:scale-[1.02] active:scale-[0.98]"
                     >
                       <Scissors className="w-3.5 h-3.5" />
                       <span>Create Clip</span>
@@ -432,6 +947,28 @@ export default function GlobalSearchPage() {
           isAiVerified={activeClipData.isVerified}
         />
       )}
+
+      {/* Scene Preview Video Modal with Carousel Navigation */}
+      <ScenePreviewModal
+        isOpen={previewModalOpen}
+        onClose={() => setPreviewModalOpen(false)}
+        scenes={displayedResults}
+        currentIndex={previewSceneIndex}
+        onNavigateIndex={(newIdx) => setPreviewSceneIndex(newIdx)}
+        onOpenClipModal={(sc) => handleOpenClip(sc)}
+      />
+
+      {/* Semantic Search History Modal */}
+      <SearchHistoryModal
+        isOpen={historyModalOpen}
+        onClose={() => {
+          setHistoryModalOpen(false);
+          fetchHistoryCount();
+        }}
+        onSelectSearch={handleRestoreSearch}
+        currentSearchId={activeHistoryId}
+      />
     </div>
   );
 }
+

@@ -55,9 +55,11 @@ class Store {
 
   public saveSync() {
     this.ensureDataDir();
-    const tempFile = `${DB_FILE}.tmp.${Date.now()}`;
-    fs.writeFileSync(tempFile, JSON.stringify(this.data, null, 2), 'utf-8');
-    fs.renameSync(tempFile, DB_FILE);
+    try {
+      fs.writeFileSync(DB_FILE, JSON.stringify(this.data, null, 2), 'utf-8');
+    } catch (err) {
+      console.error('Error saving database to file:', err);
+    }
   }
 
   public save() {
@@ -185,20 +187,87 @@ class Store {
   }
 
   // --- Search CRUD ---
+  public findCachedSearch(query: string, groupId?: string): VideoSearch | undefined {
+    this.reloadFromDisk();
+    const q = query.trim().toLowerCase();
+    const g = groupId || 'all';
+    return (this.data.searches || []).find(
+      (s) =>
+        s.query.trim().toLowerCase() === q &&
+        (s.groupId || 'all') === g &&
+        s.results &&
+        s.results.length > 0
+    );
+  }
+
   public recordSearch(search: VideoSearch) {
-    this.data.searches.unshift(search);
+    this.reloadFromDisk();
+    if (!this.data.searches) this.data.searches = [];
+
+    const q = search.query.trim().toLowerCase();
+    const g = search.groupId || 'all';
+
+    // If an existing search record has the same query and group scope, update it so we don't pollute with duplicates
+    const existingIdx = this.data.searches.findIndex(
+      (s) => s.query.trim().toLowerCase() === q && (s.groupId || 'all') === g
+    );
+
+    if (existingIdx >= 0) {
+      this.data.searches[existingIdx] = {
+        ...this.data.searches[existingIdx],
+        ...search,
+        id: this.data.searches[existingIdx].id || search.id,
+        createdAt: new Date().toISOString(),
+      };
+      // Move updated entry to the front
+      const [updated] = this.data.searches.splice(existingIdx, 1);
+      this.data.searches.unshift(updated);
+    } else {
+      this.data.searches.unshift(search);
+    }
+
     if (this.data.searches.length > 500) {
       this.data.searches = this.data.searches.slice(0, 500);
     }
-    this.save();
+    this.saveSync();
+  }
+
+  public reloadFromDisk(): void {
+    this.data = this.loadData();
   }
 
   public getSearches(videoId?: string): VideoSearch[] {
+    this.reloadFromDisk();
+    let list = [...(this.data.searches || [])];
     if (videoId) {
-      return this.data.searches.filter((s) => s.videoId === videoId);
+      list = list.filter((s) => s.videoId === videoId);
     }
-    return this.data.searches;
+    return list.sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
   }
+
+  public getSearch(id: string): VideoSearch | undefined {
+    let search = (this.data.searches || []).find((s) => s.id === id);
+    if (!search) {
+      this.reloadFromDisk();
+      search = (this.data.searches || []).find((s) => s.id === id);
+    }
+    return search;
+  }
+
+  public deleteSearch(id: string): boolean {
+    const initialLen = this.data.searches.length;
+    this.data.searches = this.data.searches.filter((s) => s.id !== id);
+    this.save();
+    return this.data.searches.length < initialLen;
+  }
+
+  public clearSearches(): void {
+    this.data.searches = [];
+    this.save();
+  }
+
 
   // --- Clip CRUD ---
   public getClips(videoId?: string): VideoClip[] {

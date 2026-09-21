@@ -2,13 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '@/lib/db/store';
 import { VideoSearch } from '@/lib/db/types';
-import { embeddingService } from '@/lib/services/embedding.service';
+import { embeddingService, segmentPrompt, PromptSegment } from '@/lib/services/embedding.service';
 import { vectorService } from '@/lib/services/vector.service';
 import { timestampVerificationService } from '@/lib/services/timestamp-verification.service';
 
 export async function POST(req: NextRequest) {
   try {
-    const { query, autoVerify = true, limit = 15, groupId } = await req.json();
+    const { query, autoVerify = true, limit = 15, groupId, forceLive = false } = await req.json();
 
     if (!query || typeof query !== 'string' || query.trim() === '') {
       return NextResponse.json({ error: 'Search query is required' }, { status: 400 });
@@ -22,6 +22,33 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         error: `Search prompt exceeds Google Gemini embedding limit of 2,048 tokens (your query is ~${estimatedTokens} tokens / ${trimmedQuery.length} characters). Please shorten your search prompt.`
       }, { status: 400 });
+    }
+
+    // Check if we already have cached results for this exact query and group scope
+    if (!forceLive) {
+      const cachedSearch = db.findCachedSearch(trimmedQuery, groupId && groupId !== 'all' ? groupId : undefined);
+      if (cachedSearch && cachedSearch.results && cachedSearch.results.length > 0) {
+        const hydratedResults = cachedSearch.results.map((res: any) => {
+          if (!res.videoStoragePath && res.videoId) {
+            const video = db.getVideo(res.videoId);
+            if (video) {
+              res.videoStoragePath = video.storagePath;
+              res.thumbnailUrl = `/api/media/thumbnails/thumb_${video.id}.jpg`;
+            }
+          }
+          return res;
+        });
+
+        return NextResponse.json({
+          query: cachedSearch.query,
+          count: cachedSearch.resultCount,
+          results: hydratedResults,
+          segments: cachedSearch.segments || [],
+          isSegmented: cachedSearch.isSegmented || false,
+          fromCache: true,
+          searchId: cachedSearch.id,
+        });
+      }
     }
 
     let videoIdFilter: string[] | undefined = undefined;
@@ -40,17 +67,97 @@ export async function POST(req: NextRequest) {
     const videos = db.getVideos();
     const videoMap = new Map(videos.map((v) => [v.id, v]));
 
-    // Generate query embedding
-    const { embedding: queryEmbedding } = await embeddingService.generateEmbedding(query);
+    // Segment the prompt into semantic parts
+    const rawSegments: PromptSegment[] = segmentPrompt(trimmedQuery);
+    const isMultiSegment = rawSegments.length > 1;
 
-    // Vector search with optional videoIdFilter (single, array, or undefined for global)
-    const matches = await vectorService.search(queryEmbedding, limit, videoIdFilter, 0.05);
+    // Track segment match mappings: sceneId -> SegmentMatch[]
+    interface SceneSegmentMatch {
+      segmentId: string;
+      segmentIndex: number;
+      segmentLabel: string;
+      segmentText: string;
+      similarity: number;
+    }
 
-    const maxRawSim = matches.length > 0 ? Math.max(...matches.map((m) => m.similarity)) : 1.0;
+    const sceneSegmentMap = new Map<string, SceneSegmentMatch[]>();
+    const sceneMatchMap = new Map<string, any>();
+
+    // 1. Generate embedding for the full query
+    const { embedding: globalEmbedding } = await embeddingService.generateEmbedding(trimmedQuery);
+    const globalMatches = await vectorService.search(globalEmbedding, limit, videoIdFilter, 0.05);
+
+    for (const m of globalMatches) {
+      sceneMatchMap.set(m.sceneId, m);
+    }
+
+    // 2. If multi-segment, generate embeddings for each segment and search
+    let segmentSummaries: (PromptSegment & { matchedClipCount: number; matchedClipIds: string[] })[] = [];
+
+    if (isMultiSegment) {
+      const segmentResults = await Promise.all(
+        rawSegments.map(async (seg: PromptSegment) => {
+          const { embedding: segEmbedding } = await embeddingService.generateEmbedding(seg.text);
+          const segMatches = await vectorService.search(segEmbedding, Math.min(limit, 10), videoIdFilter, 0.05);
+          return { segment: seg, matches: segMatches };
+        })
+      );
+
+      segmentSummaries = segmentResults.map(({ segment, matches: segMatches }: { segment: PromptSegment; matches: any[] }) => {
+        const matchedClipIds: string[] = [];
+        for (const sm of segMatches) {
+          matchedClipIds.push(sm.sceneId);
+
+          if (!sceneMatchMap.has(sm.sceneId)) {
+            sceneMatchMap.set(sm.sceneId, sm);
+          }
+
+          const existing = sceneSegmentMap.get(sm.sceneId) || [];
+          existing.push({
+            segmentId: segment.id,
+            segmentIndex: segment.index,
+            segmentLabel: segment.label,
+            segmentText: segment.text,
+            similarity: sm.similarity,
+          });
+          sceneSegmentMap.set(sm.sceneId, existing);
+        }
+
+        return {
+          ...segment,
+          matchedClipCount: matchedClipIds.length,
+          matchedClipIds,
+        };
+      });
+    } else {
+      segmentSummaries = rawSegments.map((seg: PromptSegment) => ({
+        ...seg,
+        matchedClipCount: globalMatches.length,
+        matchedClipIds: globalMatches.map((m) => m.sceneId),
+      }));
+
+      for (const gm of globalMatches) {
+        sceneSegmentMap.set(gm.sceneId, [
+          {
+            segmentId: rawSegments[0]?.id || 'seg_0',
+            segmentIndex: 1,
+            segmentLabel: 'Part 1',
+            segmentText: rawSegments[0]?.text || trimmedQuery,
+            similarity: gm.similarity,
+          },
+        ]);
+      }
+    }
+
+    // Combine candidate matches
+    const allCandidateMatches = Array.from(sceneMatchMap.values());
+    const maxRawSim = allCandidateMatches.length > 0
+      ? Math.max(...allCandidateMatches.map((m) => m.similarity))
+      : 1.0;
     const isLocalScale = maxRawSim < 0.4;
 
     const results = await Promise.all(
-      matches.map(async (match) => {
+      allCandidateMatches.map(async (match) => {
         const video = videoMap.get(match.videoId);
         let verifiedStart = match.metadata.startTime;
         let verifiedEnd = match.metadata.endTime;
@@ -66,7 +173,7 @@ export async function POST(req: NextRequest) {
         if (autoVerify) {
           try {
             const verification = await timestampVerificationService.verifyTimestamps({
-              query,
+              query: trimmedQuery,
               candidateStart: match.metadata.startTime,
               candidateEnd: match.metadata.endTime,
               sceneDescription: match.metadata.description,
@@ -86,11 +193,19 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        // Extract and sort segment associations for this clip
+        const segmentMatches = (sceneSegmentMap.get(match.sceneId) || []).sort(
+          (a, b) => b.similarity - a.similarity
+        );
+        const primarySegment = segmentMatches[0];
+
         return {
           sceneId: match.sceneId,
           videoId: match.videoId,
           videoName: video?.filename || 'Unknown Video',
           videoDuration: video?.duration || 0,
+          videoStoragePath: video?.storagePath || '',
+          thumbnailUrl: `/api/media/thumbnails/thumb_${video?.id}.jpg`,
           similarityScore,
           confidenceScore: Math.round(isVerified ? verifiedConfidence * 100 : similarityScore),
           startTime: match.metadata.startTime,
@@ -107,26 +222,44 @@ export async function POST(req: NextRequest) {
           verificationReason,
           groupId: video?.groupId,
           groupName: video?.groupName,
+          // Segment alignment attributes
+          matchedSegmentIds: segmentMatches.map((s) => s.segmentId),
+          segmentMatches,
+          primarySegmentId: primarySegment?.segmentId || null,
+          primarySegmentLabel: primarySegment?.segmentLabel || null,
+          primarySegmentText: primarySegment?.segmentText || null,
         };
       })
     );
 
+    // Sort results by confidence / similarity
+    results.sort((a, b) => b.confidenceScore - a.confidenceScore);
+
+    const targetGroup = groupId && groupId !== 'all' ? db.getGroup(groupId) : undefined;
     const searchRecord: VideoSearch = {
       id: `search_${uuidv4()}`,
-      query,
+      query: trimmedQuery,
       groupId: groupId && groupId !== 'all' ? groupId : undefined,
+      groupName: targetGroup?.name,
       resultCount: results.length,
+      results,
+      segments: segmentSummaries,
+      isSegmented: isMultiSegment,
       createdAt: new Date().toISOString(),
     };
     db.recordSearch(searchRecord);
 
     return NextResponse.json({
-      query,
+      query: trimmedQuery,
       count: results.length,
       results,
+      segments: segmentSummaries,
+      isSegmented: isMultiSegment,
     });
   } catch (err: any) {
     console.error('Global search error:', err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json({
+      error: err?.message || 'Global search failed. Please verify API configuration or try again.'
+    }, { status: 500 });
   }
 }

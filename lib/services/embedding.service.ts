@@ -10,6 +10,84 @@ export interface SceneMetadataForEmbedding {
   events: string[];
 }
 
+export interface PromptSegment {
+  id: string;
+  index: number;
+  label: string;
+  text: string;
+  wordCount: number;
+  charCount: number;
+  startIndex: number;
+  endIndex: number;
+}
+
+export function segmentPrompt(query: string): PromptSegment[] {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+
+  // Check if query has multiple explicit lines
+  const rawLines = trimmed
+    .split(/\r?\n+/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  let candidates: string[] = [];
+  if (rawLines.length >= 2) {
+    candidates = rawLines;
+  } else {
+    // Split by sentence delimiters: '.', '!', '?', or ';' followed by space or end
+    const sentences = trimmed
+      .split(/(?<=[.!?;\n])\s+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+
+    if (sentences.length >= 2) {
+      candidates = sentences;
+    } else {
+      candidates = [trimmed];
+    }
+  }
+
+  // Strip leading list numbering and merge overly tiny fragments
+  const merged: string[] = [];
+  for (const c of candidates) {
+    const cleaned = c.replace(/^(?:\d+[\.\)]\s*|[-*•]\s*)/, '').trim();
+    if (!cleaned) continue;
+
+    if (
+      merged.length > 0 &&
+      cleaned.split(/\s+/).length <= 2 &&
+      merged[merged.length - 1].split(/\s+/).length < 20
+    ) {
+      merged[merged.length - 1] += ' ' + cleaned;
+    } else {
+      merged.push(cleaned);
+    }
+  }
+
+  if (merged.length === 0) {
+    merged.push(trimmed);
+  }
+
+  let searchCursor = 0;
+  return merged.map((text, idx) => {
+    const startIndex = trimmed.indexOf(text, searchCursor);
+    const endIndex = startIndex !== -1 ? startIndex + text.length : searchCursor + text.length;
+    searchCursor = Math.max(searchCursor, endIndex);
+
+    return {
+      id: `seg_${idx}`,
+      index: idx + 1,
+      label: `Part ${idx + 1}`,
+      text,
+      wordCount: text.split(/\s+/).filter(Boolean).length,
+      charCount: text.length,
+      startIndex: startIndex !== -1 ? startIndex : 0,
+      endIndex,
+    };
+  });
+}
+
 export class EmbeddingService {
   private genAI: GoogleGenerativeAI | null = null;
   private modelName: string;

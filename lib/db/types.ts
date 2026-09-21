@@ -49,10 +49,15 @@ export interface VideoSearch {
   id: string;
   videoId?: string;
   groupId?: string;
+  groupName?: string;
   query: string;
   resultCount: number;
+  results?: any[];
+  segments?: any[];
+  isSegmented?: boolean;
   createdAt: string;
 }
+
 
 export interface VideoClip {
   id: string;

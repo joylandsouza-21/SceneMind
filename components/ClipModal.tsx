@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { X, Scissors, Download, Play, CheckCircle2, Loader2, Sparkles } from 'lucide-react';
+import Link from 'next/link';
+import { X, Scissors, Download, Play, CheckCircle2, Loader2, Sparkles, Film } from 'lucide-react';
 import { formatTime } from './VideoPlayer';
 
 interface ClipModalProps {
@@ -229,8 +230,18 @@ export default function ClipModal({
                   className="flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-emerald-600/20 transition-all"
                 >
                   <Download className="w-4 h-4" />
-                  <span>Download MP4 Clip</span>
+                  <span>Download MP4</span>
                 </a>
+
+                <Link
+                  href={`/videos/${videoId}?t=${startTime}&end=${endTime}&sceneId=${sceneId || ''}`}
+                  onClick={onClose}
+                  className="flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium rounded-xl border border-slate-700 transition-all"
+                  title="Open video studio positioned at this clip"
+                >
+                  <Film className="w-4 h-4 text-blue-400" />
+                  <span>View in Studio</span>
+                </Link>
               </div>
             </div>
           )}

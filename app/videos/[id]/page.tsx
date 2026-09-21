@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Suspense } from 'react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import {
   Film,
   Search,
@@ -17,14 +18,25 @@ import {
   Trash2,
   ArrowLeft,
   Sliders,
-  ExternalLink
+  ExternalLink,
+  Play,
+  RotateCcw
 } from 'lucide-react';
 import VideoPlayer, { VideoPlayerRef, formatTime } from '@/components/VideoPlayer';
 import TimelineBar from '@/components/TimelineBar';
 import ClipModal from '@/components/ClipModal';
 import { VideoScene } from '@/lib/db/types';
 
-export default function VideoDetailPage({ params }: { params: { id: string } }) {
+function VideoStudioContent({ params }: { params: { id: string } }) {
+  const searchParams = useSearchParams();
+  const tParam = searchParams.get('t') || searchParams.get('start');
+  const endParam = searchParams.get('end');
+  const sceneIdParam = searchParams.get('sceneId');
+  const targetSceneIdParam = sceneIdParam;
+
+  const targetTime = tParam !== null && !isNaN(parseFloat(tParam)) ? parseFloat(tParam) : null;
+  const targetEnd = endParam !== null && !isNaN(parseFloat(endParam)) ? parseFloat(endParam) : null;
+
   const [video, setVideo] = useState<any | null>(null);
   const [scenes, setScenes] = useState<VideoScene[]>([]);
   const [clips, setClips] = useState<any[]>([]);
@@ -40,6 +52,7 @@ export default function VideoDetailPage({ params }: { params: { id: string } }) 
   const [clipSceneId, setClipSceneId] = useState<string | undefined>(undefined);
 
   const playerRef = useRef<VideoPlayerRef | null>(null);
+  const hasScrolledRef = useRef(false);
 
   const fetchVideoDetails = async () => {
     try {
@@ -47,9 +60,22 @@ export default function VideoDetailPage({ params }: { params: { id: string } }) 
       if (res.ok) {
         const data = await res.json();
         setVideo(data.video);
-        setScenes(data.scenes || []);
+        const fetchedScenes: VideoScene[] = data.scenes || [];
+        setScenes(fetchedScenes);
         setClips(data.clips || []);
         setJobs(data.jobs || []);
+
+        // Point to targeted clip/scene if requested in URL
+        if (targetSceneIdParam || targetTime !== null) {
+          const matched = fetchedScenes.find(
+            (s) =>
+              (targetSceneIdParam && s.id === targetSceneIdParam) ||
+              (targetTime !== null && targetTime >= s.startTime && targetTime <= s.endTime)
+          );
+          if (matched) {
+            setActiveScene(matched);
+          }
+        }
       }
     } catch (e) {
       console.error('Error fetching video details:', e);
@@ -64,7 +90,7 @@ export default function VideoDetailPage({ params }: { params: { id: string } }) 
     return () => clearInterval(interval);
   }, [params.id]);
 
-  // Sync active scene based on video currentTime
+  // Sync active scene based on video currentTime (when not explicitly pinned)
   useEffect(() => {
     const matched = scenes.find(
       (s) => currentTime >= s.startTime && currentTime <= s.endTime
@@ -73,6 +99,21 @@ export default function VideoDetailPage({ params }: { params: { id: string } }) 
       setActiveScene(matched);
     }
   }, [currentTime, scenes, activeScene]);
+
+  // Auto-scroll to target scene card if loaded from a clip
+  useEffect(() => {
+    if (!hasScrolledRef.current && (activeScene || targetSceneIdParam) && scenes.length > 0) {
+      const idToScroll = activeScene?.id || targetSceneIdParam;
+      const timer = setTimeout(() => {
+        const el = document.getElementById(`scene-${idToScroll}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          hasScrolledRef.current = true;
+        }
+      }, 700);
+      return () => clearTimeout(timer);
+    }
+  }, [scenes.length, activeScene, targetSceneIdParam]);
 
   const handleSeekScene = (scene: VideoScene) => {
     setActiveScene(scene);
@@ -97,29 +138,6 @@ export default function VideoDetailPage({ params }: { params: { id: string } }) 
       fetchVideoDetails();
     } catch (e) {
       console.error('Reindex error:', e);
-    }
-  };
-
-  const handleDeleteScene = async (sceneId: string) => {
-    if (!confirm('Delete this scene from the index?')) return;
-    try {
-      const res = await fetch(`/api/scenes/${sceneId}`, { method: 'DELETE' });
-      if (res.ok) {
-        setScenes((prev) => prev.filter((s) => s.id !== sceneId));
-      }
-    } catch (e) {
-      console.error('Delete scene error:', e);
-    }
-  };
-
-  const handleReindexScene = async (sceneId: string) => {
-    try {
-      const res = await fetch(`/api/scenes/${sceneId}`, { method: 'POST' });
-      if (res.ok) {
-        fetchVideoDetails();
-      }
-    } catch (e) {
-      console.error('Re-index scene error:', e);
     }
   };
 
@@ -209,6 +227,49 @@ export default function VideoDetailPage({ params }: { params: { id: string } }) 
         </div>
       </div>
 
+      {/* Target Clip Focused Banner */}
+      {targetTime !== null && (
+        <div className="p-3.5 rounded-2xl bg-blue-950/40 border border-blue-500/40 flex items-center justify-between gap-3 text-xs animate-in fade-in">
+          <div className="flex items-center space-x-3 min-w-0">
+            <div className="w-8 h-8 rounded-xl bg-blue-500/20 border border-blue-500/30 text-blue-400 flex items-center justify-center shrink-0">
+              <Play className="w-4 h-4 fill-current ml-0.5" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center space-x-2 flex-wrap">
+                <span className="font-bold text-white">Target Clip Focused</span>
+                <span className="px-2 py-0.5 rounded bg-blue-500/20 text-blue-300 font-mono font-semibold">
+                  {formatTime(targetTime)} {targetEnd !== null ? `→ ${formatTime(targetEnd)}` : ''}
+                </span>
+                {activeScene && (
+                  <span className="text-[11px] text-slate-400 font-medium">
+                    (Scene #{activeScene.sceneNumber})
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-0.5 truncate">
+                Studio player and timeline positioned at requested clip timestamp.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                if (playerRef.current) {
+                  playerRef.current.seekTo(targetTime);
+                }
+              }}
+              className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold transition-colors flex items-center space-x-1.5"
+              title="Replay this clip from start"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Replay Clip</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Processing Status Banner */}
       {video.status === 'processing' && (
         <div className="p-5 rounded-2xl bg-slate-900/90 border border-amber-500/30 space-y-3">
@@ -240,9 +301,14 @@ export default function VideoDetailPage({ params }: { params: { id: string } }) 
           ref={playerRef}
           src={`/api/media/${video.storagePath}`}
           poster={`/api/media/thumbnails/thumb_${video.id}.jpg`}
+          initialTime={targetTime !== null ? targetTime : undefined}
           onTimeUpdate={(t) => setCurrentTime(t)}
           activeSceneRange={
-            activeScene ? { start: activeScene.startTime, end: activeScene.endTime } : null
+            activeScene
+              ? { start: activeScene.startTime, end: activeScene.endTime }
+              : targetTime !== null && targetEnd !== null
+              ? { start: targetTime, end: targetEnd }
+              : null
           }
           onRequestClip={(t) => {
             const start = Math.max(0, t - 5);
@@ -296,16 +362,17 @@ export default function VideoDetailPage({ params }: { params: { id: string } }) 
               return (
                 <div
                   key={scene.id}
+                  id={`scene-${scene.id}`}
                   className={`glass-panel p-5 rounded-2xl border transition-all duration-200 ${
                     isCurrent
-                      ? 'border-blue-500/80 bg-blue-950/20 shadow-lg shadow-blue-500/10 scale-[1.01]'
+                      ? 'border-blue-500/80 bg-blue-950/25 shadow-lg shadow-blue-500/20 ring-1 ring-blue-500/40 scale-[1.01]'
                       : 'border-slate-800/80 hover:border-slate-700'
                   }`}
                 >
                   {/* Scene Header */}
                   <div className="flex items-start justify-between gap-2">
                     <div>
-                      <div className="flex items-center space-x-2">
+                      <div className="flex items-center space-x-2 flex-wrap gap-y-1">
                         <span className="font-bold text-white text-sm">
                           Scene #{scene.sceneNumber}
                         </span>
@@ -315,6 +382,12 @@ export default function VideoDetailPage({ params }: { params: { id: string } }) 
                         <span className="text-[11px] text-slate-500 font-mono">
                           ({scene.duration}s)
                         </span>
+                        {isCurrent && (
+                          <span className="px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 text-[10px] font-bold border border-blue-500/40 flex items-center space-x-1 animate-pulse">
+                            <Sparkles className="w-2.5 h-2.5" />
+                            <span>Active Clip</span>
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -411,22 +484,38 @@ export default function VideoDetailPage({ params }: { params: { id: string } }) 
             {clips.map((clip) => (
               <div
                 key={clip.id}
-                className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800 space-y-2"
+                className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800 space-y-3 flex flex-col justify-between"
               >
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-mono text-blue-400 font-semibold">
-                    {formatTime(clip.startTime)} → {formatTime(clip.endTime)}
-                  </span>
-                  <span className="text-slate-500">({clip.duration}s)</span>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-mono text-blue-400 font-semibold">
+                      {formatTime(clip.startTime)} → {formatTime(clip.endTime)}
+                    </span>
+                    <span className="text-slate-500">({clip.duration}s)</span>
+                  </div>
+                  {clip.query && (
+                    <p className="text-xs text-slate-300 italic line-clamp-1">"{clip.query}"</p>
+                  )}
+                  <video
+                    src={`/api/media/${clip.outputPath}`}
+                    controls
+                    className="w-full rounded-xl bg-black aspect-video object-contain"
+                  />
                 </div>
-                {clip.query && (
-                  <p className="text-xs text-slate-300 italic line-clamp-1">"{clip.query}"</p>
-                )}
-                <video
-                  src={`/api/media/${clip.outputPath}`}
-                  controls
-                  className="w-full rounded-xl bg-black aspect-video object-contain"
-                />
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (playerRef.current) {
+                      playerRef.current.seekTo(clip.startTime);
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }
+                  }}
+                  className="w-full py-1.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-blue-300 hover:text-white text-xs font-semibold border border-slate-700/80 transition-all flex items-center justify-center space-x-1.5"
+                >
+                  <Play className="w-3 h-3 fill-current" />
+                  <span>Jump to Clip in Main Video</span>
+                </button>
               </div>
             ))}
           </div>
@@ -443,5 +532,20 @@ export default function VideoDetailPage({ params }: { params: { id: string } }) 
         sceneId={clipSceneId}
       />
     </div>
+  );
+}
+
+export default function VideoDetailPage({ params }: { params: { id: string } }) {
+  return (
+    <Suspense
+      fallback={
+        <div className="py-20 text-center space-y-4">
+          <Activity className="w-8 h-8 text-blue-500 animate-spin mx-auto" />
+          <p className="text-sm text-slate-400">Loading video studio...</p>
+        </div>
+      }
+    >
+      <VideoStudioContent params={params} />
+    </Suspense>
   );
 }

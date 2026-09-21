@@ -573,7 +573,28 @@ export default function VideosPage() {
           )}
         </div>
 
-        {displayedVideos.length === 0 && !loading ? (
+        {loading ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div
+                key={i}
+                className="glass-panel rounded-2xl border border-slate-800 overflow-hidden space-y-4 animate-pulse"
+              >
+                <div className="aspect-video bg-slate-900/80 flex items-center justify-center">
+                  <Film className="w-8 h-8 text-slate-800" />
+                </div>
+                <div className="p-5 space-y-3">
+                  <div className="h-4 bg-slate-800 rounded w-3/4" />
+                  <div className="h-3 bg-slate-800/60 rounded w-1/2" />
+                  <div className="pt-3 border-t border-slate-800/60 flex items-center justify-between">
+                    <div className="h-5 bg-slate-800 rounded w-20" />
+                    <div className="h-5 bg-slate-800 rounded w-16" />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : displayedVideos.length === 0 ? (
           <div className="p-12 rounded-3xl bg-slate-900/40 border border-slate-800 text-center space-y-3">
             <Film className="w-12 h-12 text-slate-600 mx-auto" />
             <h4 className="text-slate-300 font-semibold">
