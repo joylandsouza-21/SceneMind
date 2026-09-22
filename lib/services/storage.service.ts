@@ -1,8 +1,13 @@
 import fs from 'fs';
 import path from 'path';
+import { pipeline } from 'stream/promises';
+import { Readable } from 'stream';
 
 export interface IStorageService {
-  saveVideo(filename: string, buffer: Buffer): Promise<{ storageKey: string; absolutePath: string }>;
+  saveVideo(
+    filename: string,
+    data: Buffer | ReadableStream<Uint8Array> | NodeJS.ReadableStream
+  ): Promise<{ storageKey: string; absolutePath: string }>;
   saveClip(filename: string, buffer: Buffer): Promise<{ storageKey: string; absolutePath: string }>;
   saveThumbnail(filename: string, buffer: Buffer): Promise<{ storageKey: string; absolutePath: string }>;
   getAbsolutePath(storageKey: string): string;
@@ -39,11 +44,24 @@ export class LocalStorageService implements IStorageService {
     return path.basename(name).replace(/[^a-zA-Z0-9._-]/g, '_');
   }
 
-  public async saveVideo(filename: string, buffer: Buffer): Promise<{ storageKey: string; absolutePath: string }> {
+  public async saveVideo(
+    filename: string,
+    data: Buffer | ReadableStream<Uint8Array> | NodeJS.ReadableStream
+  ): Promise<{ storageKey: string; absolutePath: string }> {
     this.ensureDirs();
     const safeName = `${Date.now()}_${this.sanitizeFilename(filename)}`;
     const fullPath = path.join(this.videosDir, safeName);
-    await fs.promises.writeFile(fullPath, buffer);
+
+    if (Buffer.isBuffer(data)) {
+      await fs.promises.writeFile(fullPath, data);
+    } else {
+      const nodeStream = (data as any).getReader
+        ? Readable.fromWeb(data as any)
+        : (data as NodeJS.ReadableStream);
+      const writeStream = fs.createWriteStream(fullPath);
+      await pipeline(nodeStream, writeStream);
+    }
+
     return { storageKey: `videos/${safeName}`, absolutePath: fullPath };
   }
 

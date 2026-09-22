@@ -29,6 +29,8 @@ RUN npm install
 FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+RUN mkdir -p /app/public
+
 
 # Disable Next.js telemetry during build
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -46,6 +48,7 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_OPTIONS="--max-old-space-size=4096"
 
 # Create persistent storage directories
 RUN mkdir -p /app/storage/videos /app/storage/clips /app/storage/thumbnails /app/data

@@ -19,6 +19,7 @@ const defaultData: DatabaseSchema = {
 class Store {
   private data: DatabaseSchema;
   private saveTimeout: NodeJS.Timeout | null = null;
+  private lastMtime: number = 0;
 
   constructor() {
     this.ensureDataDir();
@@ -28,6 +29,19 @@ class Store {
   private ensureDataDir() {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+  }
+
+  public reloadIfChanged() {
+    try {
+      if (fs.existsSync(DB_FILE)) {
+        const stat = fs.statSync(DB_FILE);
+        if (stat.mtimeMs > this.lastMtime) {
+          this.data = this.loadData();
+        }
+      }
+    } catch {
+      // fallback silently
     }
   }
 
@@ -46,6 +60,8 @@ class Store {
       }
 
       if (fs.existsSync(DB_FILE)) {
+        const stat = fs.statSync(DB_FILE);
+        this.lastMtime = stat.mtimeMs;
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
         return {
@@ -69,6 +85,9 @@ class Store {
     this.ensureDataDir();
     try {
       fs.writeFileSync(DB_FILE, JSON.stringify(this.data, null, 2), 'utf-8');
+      try {
+        this.lastMtime = fs.statSync(DB_FILE).mtimeMs;
+      } catch {}
     } catch (err) {
       console.error('Error saving database to file:', err);
     }
@@ -85,16 +104,19 @@ class Store {
 
   // --- Group CRUD ---
   public getGroups(): VideoGroup[] {
+    this.reloadIfChanged();
     return [...(this.data.groups || [])].sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
   }
 
   public getGroup(id: string): VideoGroup | undefined {
+    this.reloadIfChanged();
     return (this.data.groups || []).find((g) => g.id === id);
   }
 
   public upsertGroup(group: VideoGroup): VideoGroup {
+    this.reloadIfChanged();
     if (!this.data.groups) this.data.groups = [];
     const idx = this.data.groups.findIndex((g) => g.id === group.id);
     if (idx >= 0) {
@@ -107,6 +129,7 @@ class Store {
   }
 
   public deleteGroup(id: string): boolean {
+    this.reloadIfChanged();
     if (!this.data.groups) return false;
     const initialLen = this.data.groups.length;
     this.data.groups = this.data.groups.filter((g) => g.id !== id);
@@ -123,6 +146,7 @@ class Store {
 
   // --- Video CRUD ---
   public getVideos(groupId?: string): Video[] {
+    this.reloadIfChanged();
     let list = [...this.data.videos];
     if (groupId) {
       list = list.filter((v) => v.groupId === groupId);
@@ -133,10 +157,12 @@ class Store {
   }
 
   public getVideo(id: string): Video | undefined {
+    this.reloadIfChanged();
     return this.data.videos.find((v) => v.id === id);
   }
 
   public upsertVideo(video: Video): Video {
+    this.reloadIfChanged();
     const idx = this.data.videos.findIndex((v) => v.id === video.id);
     if (idx >= 0) {
       this.data.videos[idx] = { ...video, updatedAt: new Date().toISOString() };
@@ -161,6 +187,7 @@ class Store {
 
   // --- Scene CRUD ---
   public getScenes(videoId?: string): VideoScene[] {
+    this.reloadIfChanged();
     if (videoId) {
       return this.data.scenes
         .filter((s) => s.videoId === videoId)
@@ -170,10 +197,12 @@ class Store {
   }
 
   public getScene(id: string): VideoScene | undefined {
+    this.reloadIfChanged();
     return this.data.scenes.find((s) => s.id === id);
   }
 
   public upsertScene(scene: VideoScene): VideoScene {
+    this.reloadIfChanged();
     const idx = this.data.scenes.findIndex((s) => s.id === scene.id);
     if (idx >= 0) {
       this.data.scenes[idx] = scene;
@@ -185,12 +214,14 @@ class Store {
   }
 
   public replaceScenesForVideo(videoId: string, scenes: VideoScene[]) {
+    this.reloadIfChanged();
     this.data.scenes = this.data.scenes.filter((s) => s.videoId !== videoId);
     this.data.scenes.push(...scenes);
     this.save();
   }
 
   public deleteScene(id: string): boolean {
+    this.reloadIfChanged();
     const initialLen = this.data.scenes.length;
     this.data.scenes = this.data.scenes.filter((s) => s.id !== id);
     this.data.vectors = this.data.vectors.filter((v) => v.sceneId !== id);
@@ -200,7 +231,7 @@ class Store {
 
   // --- Search CRUD ---
   public findCachedSearch(query: string, groupId?: string): VideoSearch | undefined {
-    this.reloadFromDisk();
+    this.reloadIfChanged();
     const q = query.trim().toLowerCase();
     const g = groupId || 'all';
     return (this.data.searches || []).find(
@@ -213,7 +244,7 @@ class Store {
   }
 
   public recordSearch(search: VideoSearch) {
-    this.reloadFromDisk();
+    this.reloadIfChanged();
     if (!this.data.searches) this.data.searches = [];
 
     const q = search.query.trim().toLowerCase();
@@ -249,7 +280,7 @@ class Store {
   }
 
   public getSearches(videoId?: string): VideoSearch[] {
-    this.reloadFromDisk();
+    this.reloadIfChanged();
     let list = [...(this.data.searches || [])];
     if (videoId) {
       list = list.filter((s) => s.videoId === videoId);
@@ -260,15 +291,12 @@ class Store {
   }
 
   public getSearch(id: string): VideoSearch | undefined {
-    let search = (this.data.searches || []).find((s) => s.id === id);
-    if (!search) {
-      this.reloadFromDisk();
-      search = (this.data.searches || []).find((s) => s.id === id);
-    }
-    return search;
+    this.reloadIfChanged();
+    return (this.data.searches || []).find((s) => s.id === id);
   }
 
   public deleteSearch(id: string): boolean {
+    this.reloadIfChanged();
     const initialLen = this.data.searches.length;
     this.data.searches = this.data.searches.filter((s) => s.id !== id);
     this.save();
@@ -276,6 +304,7 @@ class Store {
   }
 
   public clearSearches(): void {
+    this.reloadIfChanged();
     this.data.searches = [];
     this.save();
   }
@@ -283,6 +312,7 @@ class Store {
 
   // --- Clip CRUD ---
   public getClips(videoId?: string): VideoClip[] {
+    this.reloadIfChanged();
     if (videoId) {
       return this.data.clips
         .filter((c) => c.videoId === videoId)
@@ -294,10 +324,12 @@ class Store {
   }
 
   public getClip(id: string): VideoClip | undefined {
+    this.reloadIfChanged();
     return this.data.clips.find((c) => c.id === id);
   }
 
   public upsertClip(clip: VideoClip): VideoClip {
+    this.reloadIfChanged();
     const idx = this.data.clips.findIndex((c) => c.id === clip.id);
     if (idx >= 0) {
       this.data.clips[idx] = clip;
@@ -310,6 +342,7 @@ class Store {
 
   // --- Jobs CRUD ---
   public getJobs(videoId?: string): ProcessingJob[] {
+    this.reloadIfChanged();
     if (videoId) {
       return this.data.jobs
         .filter((j) => j.videoId === videoId)
@@ -321,10 +354,12 @@ class Store {
   }
 
   public getJob(id: string): ProcessingJob | undefined {
+    this.reloadIfChanged();
     return this.data.jobs.find((j) => j.id === id);
   }
 
   public upsertJob(job: ProcessingJob): ProcessingJob {
+    this.reloadIfChanged();
     const idx = this.data.jobs.findIndex((j) => j.id === job.id);
     if (idx >= 0) {
       this.data.jobs[idx] = { ...job, updatedAt: new Date().toISOString() };
@@ -336,6 +371,7 @@ class Store {
   }
 
   public deleteJob(id: string): boolean {
+    this.reloadIfChanged();
     const initialLen = this.data.jobs.length;
     this.data.jobs = this.data.jobs.filter((j) => j.id !== id);
     this.save();
@@ -344,11 +380,13 @@ class Store {
 
   // --- Costs CRUD ---
   public recordCost(cost: AiCost) {
+    this.reloadIfChanged();
     this.data.costs.push(cost);
     this.save();
   }
 
   public getCosts(videoId?: string): AiCost[] {
+    this.reloadIfChanged();
     if (videoId) {
       return this.data.costs.filter((c) => c.videoId === videoId);
     }
@@ -357,6 +395,7 @@ class Store {
 
   // --- Vectors CRUD ---
   public upsertVector(record: VectorRecord) {
+    this.reloadIfChanged();
     const idx = this.data.vectors.findIndex((v) => v.id === record.id);
     if (idx >= 0) {
       this.data.vectors[idx] = record;
@@ -367,6 +406,7 @@ class Store {
   }
 
   public getVectors(videoId?: string | string[]): VectorRecord[] {
+    this.reloadIfChanged();
     if (!videoId) {
       return this.data.vectors;
     }
@@ -378,6 +418,7 @@ class Store {
   }
 
   public deleteVector(id: string) {
+    this.reloadIfChanged();
     this.data.vectors = this.data.vectors.filter((v) => v.id !== id);
     this.save();
   }
@@ -386,4 +427,5 @@ class Store {
 // Global Singleton for Next.js hot-reloading preservation
 const globalForStore = globalThis as unknown as { storeInstance: Store };
 export const db = globalForStore.storeInstance || new Store();
-if (process.env.NODE_ENV !== 'production') globalForStore.storeInstance = db;
+globalForStore.storeInstance = db;
+

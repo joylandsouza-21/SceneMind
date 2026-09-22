@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ----------------------------------------------------------------------------
   # 1. Reverse Proxy & Accelerated Video Streaming (Nginx)
@@ -28,16 +26,22 @@ services:
       dockerfile: Dockerfile
     container_name: scenemind_app
     restart: unless-stopped
+    env_file:
+      - path: .env.docker
+        required: false
+      - path: .env
+        required: false
     environment:
       - NODE_ENV=production
       - PORT=3000
       - HOSTNAME=0.0.0.0
+      - NODE_OPTIONS=${NODE_OPTIONS:---max-old-space-size=4096}
       # AI Model Settings
       - GEMINI_API_KEY=${GEMINI_API_KEY:-AQ.Ab8RN6JFSBntU7TUau4qaavj_3FFYdi_mKNNPSz_imFmY22N5w}
-      - GEMINI_MODEL=gemini-2.0-flash
-      - GEMINI_EMBEDDING_MODEL=text-embedding-004
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.6-flash}
+      - GEMINI_EMBEDDING_MODEL=${GEMINI_EMBEDDING_MODEL:-text-embedding-001}
       # Vector & Database Credentials
-      - VECTOR_STORE_PROVIDER=pgvector
+      - VECTOR_STORE_PROVIDER=${VECTOR_STORE_PROVIDER:-pgvector}
       - DATABASE_URL=postgresql://${POSTGRES_USER:-scenemind_admin}:${POSTGRES_PASSWORD:-scenemind_vault_secure_2026}@postgres:5432/${POSTGRES_DB:-scenemind_db}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-scenemind_redis_vault_2026}@redis:6379
       # Storage Path inside container
