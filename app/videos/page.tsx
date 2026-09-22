@@ -742,7 +742,7 @@ export default function VideosPage() {
                 {/* Card Actions */}
                 <div className="px-5 py-3.5 border-t border-slate-800/80 bg-slate-900/50 flex items-center justify-between gap-2">
                   <div className="flex items-center space-x-2">
-                    {video.status !== 'failed' && video.status !== 'cancelled' && (
+                    {video.status === 'indexed' && (
                       <>
                         <Link
                           href={`/videos/${video.id}`}
@@ -761,6 +761,12 @@ export default function VideosPage() {
                           <span>Search</span>
                         </Link>
                       </>
+                    )}
+                    {(video.status === 'processing' || video.status === 'pending') && (
+                      <span className="text-[11px] text-amber-400/80 italic flex items-center gap-1.5">
+                        <RefreshCw className="w-3 h-3 animate-spin" />
+                        Processing — actions available after indexing
+                      </span>
                     )}
                     {(video.status === 'failed' || video.status === 'cancelled') && (
                       <span className="text-[11px] text-slate-400 italic">
