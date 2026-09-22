@@ -201,7 +201,7 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
         {/* Action Buttons */}
         <div className="flex items-center space-x-3">
           <Link
-            href={`/videos/${video.id}/search`}
+            href={`/search?videoId=${video.id}${video.groupId ? `&groupId=${video.groupId}` : ''}`}
             className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-semibold shadow-lg shadow-blue-500/20 transition-all hover:scale-105 active:scale-95"
           >
             <Search className="w-3.5 h-3.5" />

@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
   Search,
   Sparkles,
@@ -20,6 +21,7 @@ import VideoPlayer, { VideoPlayerRef, formatTime } from '@/components/VideoPlaye
 import ClipModal from '@/components/ClipModal';
 
 export default function VideoSemanticSearchPage({ params }: { params: { id: string } }) {
+  const router = useRouter();
   const [video, setVideo] = useState<any | null>(null);
   const [query, setQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
@@ -27,6 +29,11 @@ export default function VideoSemanticSearchPage({ params }: { params: { id: stri
   const [hasSearched, setHasSearched] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [activePreviewRange, setActivePreviewRange] = useState<{ start: number; end: number } | null>(null);
+
+  // Automatically redirect to Global Search with preselected video
+  useEffect(() => {
+    router.replace(`/search?videoId=${params.id}`);
+  }, [params.id, router]);
 
   // Clip modal state
   const [clipModalOpen, setClipModalOpen] = useState(false);

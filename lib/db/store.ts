@@ -199,14 +199,16 @@ class Store {
   }
 
   // --- Search CRUD ---
-  public findCachedSearch(query: string, groupId?: string): VideoSearch | undefined {
+  public findCachedSearch(query: string, groupId?: string, videoId?: string): VideoSearch | undefined {
     this.reloadFromDisk();
     const q = query.trim().toLowerCase();
     const g = groupId || 'all';
+    const v = videoId || 'all';
     return (this.data.searches || []).find(
       (s) =>
         s.query.trim().toLowerCase() === q &&
         (s.groupId || 'all') === g &&
+        (s.videoId || 'all') === v &&
         s.results &&
         s.results.length > 0
     );
@@ -218,10 +220,14 @@ class Store {
 
     const q = search.query.trim().toLowerCase();
     const g = search.groupId || 'all';
+    const v = search.videoId || 'all';
 
-    // If an existing search record has the same query and group scope, update it so we don't pollute with duplicates
+    // If an existing search record has the same query, group scope, and video scope, update it so we don't pollute with duplicates
     const existingIdx = this.data.searches.findIndex(
-      (s) => s.query.trim().toLowerCase() === q && (s.groupId || 'all') === g
+      (s) =>
+        s.query.trim().toLowerCase() === q &&
+        (s.groupId || 'all') === g &&
+        (s.videoId || 'all') === v
     );
 
     if (existingIdx >= 0) {

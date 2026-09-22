@@ -8,6 +8,7 @@ import {
   Trash2,
   Clock,
   Folder,
+  Film,
   Layers,
   Sparkles,
   ArrowRight,
@@ -21,6 +22,8 @@ export interface SearchHistoryItem {
   query: string;
   groupId?: string;
   groupName?: string;
+  videoId?: string;
+  videoTitle?: string;
   resultCount: number;
   hasResults?: boolean;
   isSegmented: boolean;
@@ -109,10 +112,15 @@ export default function SearchHistoryModal({
     }
   };
 
-  const filteredHistory = history.filter((item) =>
-    item.query.toLowerCase().includes(filterQuery.toLowerCase()) ||
-    (item.groupName && item.groupName.toLowerCase().includes(filterQuery.toLowerCase()))
-  );
+  const filteredHistory = history.filter((h) => {
+    if (!filterQuery) return true;
+    const q = filterQuery.toLowerCase();
+    return (
+      h.query.toLowerCase().includes(q) ||
+      (h.groupName && h.groupName.toLowerCase().includes(q)) ||
+      (h.videoTitle && h.videoTitle.toLowerCase().includes(q))
+    );
+  });
 
   const formatRelativeTime = (isoString: string) => {
     try {
@@ -136,29 +144,28 @@ export default function SearchHistoryModal({
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-150"
-      onClick={onClose}
-    >
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6">
       <div
-        className="w-full max-w-2xl bg-[#0b101b] border border-slate-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh] animate-in zoom-in-95 duration-150"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="p-5 border-b border-slate-800/80 flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-xl bg-blue-500/10 border border-blue-500/25 flex items-center justify-center text-blue-400">
-              <History className="w-5 h-5" />
+        className="fixed inset-0 bg-black/80 backdrop-blur-sm transition-opacity animate-in fade-in"
+        onClick={onClose}
+      />
+
+      <div className="relative w-full max-w-2xl bg-slate-950 border border-slate-800 rounded-3xl shadow-2xl flex flex-col max-h-[85vh] overflow-hidden z-10 animate-in zoom-in-95 duration-200">
+        {/* Modal Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800/80 bg-slate-900/60">
+          <div className="flex items-center space-x-2.5">
+            <div className="w-8 h-8 rounded-xl bg-blue-500/10 border border-blue-500/25 flex items-center justify-center text-blue-400">
+              <History className="w-4 h-4" />
             </div>
             <div>
-              <div className="flex items-center space-x-2">
-                <h3 className="text-base font-bold text-white">Semantic Search History</h3>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 font-mono">
+              <h3 className="text-base font-bold text-white flex items-center space-x-2">
+                <span>Semantic Search History</span>
+                <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">
                   {history.length}
                 </span>
-              </div>
-              <p className="text-xs text-slate-400">
-                Click any previous query to instantly restore its prompt, segments, and matched clips.
+              </h3>
+              <p className="text-[11px] text-slate-400">
+                Instantly load cached results or re-run queries
               </p>
             </div>
           </div>
@@ -168,35 +175,34 @@ export default function SearchHistoryModal({
               <button
                 type="button"
                 onClick={handleClearAll}
-                className="text-xs text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 px-3 py-1.5 rounded-lg transition-colors flex items-center space-x-1"
+                className="flex items-center space-x-1 px-2.5 py-1.5 rounded-xl text-[11px] text-slate-400 hover:text-red-400 hover:bg-red-500/10 border border-slate-800 hover:border-red-500/30 transition-colors"
                 title="Clear all search history"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Clear All</span>
+                <span>Clear All</span>
               </button>
             )}
             <button
               type="button"
               onClick={onClose}
-              className="p-2 text-slate-400 hover:text-white rounded-xl hover:bg-slate-800/60 transition-colors"
-              title="Close (Esc)"
+              className="p-1.5 text-slate-400 hover:text-white rounded-xl hover:bg-slate-800 transition-colors"
             >
-              <X className="w-5 h-5" />
+              <X className="w-4 h-4" />
             </button>
           </div>
         </div>
 
         {/* Filter Input */}
         {history.length > 3 && (
-          <div className="p-4 border-b border-slate-800/60 bg-slate-950/40">
+          <div className="px-6 py-2.5 border-b border-slate-800/60 bg-slate-900/30">
             <div className="relative">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
                 value={filterQuery}
                 onChange={(e) => setFilterQuery(e.target.value)}
-                placeholder="Filter search history..."
-                className="w-full pl-9 pr-4 py-2 bg-slate-900/80 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                placeholder="Filter saved queries..."
+                className="w-full pl-8 pr-3 py-1.5 bg-slate-900/90 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
               />
             </div>
           </div>
@@ -250,6 +256,13 @@ export default function SearchHistoryModal({
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 text-[10px] font-semibold">
                           <Folder className="w-2.5 h-2.5 text-indigo-400" />
                           <span>{item.groupName}</span>
+                        </span>
+                      )}
+
+                      {item.videoTitle && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-blue-500/15 text-blue-300 border border-blue-500/30 text-[10px] font-semibold max-w-[160px] truncate" title={item.videoTitle}>
+                          <Film className="w-2.5 h-2.5 text-blue-400 shrink-0" />
+                          <span className="truncate">{item.videoTitle}</span>
                         </span>
                       )}
 
