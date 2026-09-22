@@ -38,11 +38,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const arrayBuffer = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    // Save video to storage
-    const { storageKey, absolutePath } = await storageService.saveVideo(originalName, buffer);
+    // Save video to storage via direct stream to avoid buffering huge files in RAM
+    const { storageKey, absolutePath } = await storageService.saveVideo(originalName, file.stream());
 
     // Extract preliminary metadata via ffprobe
     const metadata = await ffmpegService.getMetadata(absolutePath);
