@@ -12,17 +12,26 @@ export async function GET(req: NextRequest) {
     const searches = db.getSearches(videoId);
 
     // Return summaries with result count and segment counts
-    const history = searches.map((s) => ({
-      id: s.id,
-      query: s.query,
-      groupId: s.groupId,
-      groupName: s.groupName,
-      resultCount: s.resultCount,
-      hasResults: !!(s.results && s.results.length > 0),
-      isSegmented: s.isSegmented || (s.segments && s.segments.length > 1),
-      segmentCount: s.segments?.length || 1,
-      createdAt: s.createdAt,
-    }));
+    const history = searches.map((s) => {
+      let videoTitle: string | undefined = undefined;
+      if (s.videoId) {
+        const v = db.getVideo(s.videoId);
+        if (v) videoTitle = v.filename;
+      }
+      return {
+        id: s.id,
+        query: s.query,
+        groupId: s.groupId,
+        groupName: s.groupName,
+        videoId: s.videoId,
+        videoTitle,
+        resultCount: s.resultCount,
+        hasResults: !!(s.results && s.results.length > 0),
+        isSegmented: s.isSegmented || (s.segments && s.segments.length > 1),
+        segmentCount: s.segments?.length || 1,
+        createdAt: s.createdAt,
+      };
+    });
 
     return NextResponse.json({ history });
   } catch (err: any) {

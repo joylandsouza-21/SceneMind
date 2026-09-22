@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, Suspense } from 'react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import {
   Search,
   Sparkles,
@@ -23,6 +24,7 @@ import {
 import { formatTime } from '@/components/VideoPlayer';
 import ClipModal from '@/components/ClipModal';
 import GroupSelectDropdown from '@/components/GroupSelectDropdown';
+import VideoSelectDropdown from '@/components/VideoSelectDropdown';
 import SearchHistoryModal, { SearchHistoryItem } from '@/components/SearchHistoryModal';
 import ScenePreviewModal from '@/components/ScenePreviewModal';
 
@@ -109,10 +111,13 @@ function getSegmentColor(index: number) {
   return SEGMENT_COLORS[(index - 1) % SEGMENT_COLORS.length] || SEGMENT_COLORS[0];
 }
 
-export default function GlobalSearchPage() {
+function GlobalSearchContent() {
+  const searchParams = useSearchParams();
   const [query, setQuery] = useState('');
   const [groups, setGroups] = useState<any[]>([]);
+  const [videos, setVideos] = useState<any[]>([]);
   const [selectedGroupId, setSelectedGroupId] = useState<string>('all');
+  const [selectedVideoId, setSelectedVideoId] = useState<string>('all');
   const [isSearching, setIsSearching] = useState(false);
   const [results, setResults] = useState<any[]>([]);
   const [segments, setSegments] = useState<PromptSegmentItem[]>([]);
@@ -152,12 +157,35 @@ export default function GlobalSearchPage() {
   };
 
   useEffect(() => {
+    const urlGroupId = searchParams.get('groupId');
+    const urlVideoId = searchParams.get('videoId');
+    const urlQuery = searchParams.get('q');
+
+    if (urlGroupId) setSelectedGroupId(urlGroupId);
+    if (urlVideoId) setSelectedVideoId(urlVideoId);
+    if (urlQuery) setQuery(urlQuery);
+
     fetch('/api/groups')
       .then((res) => res.json())
       .then((data) => setGroups(data.groups || []))
       .catch((err) => console.error('Failed to load groups:', err));
+
+    fetch('/api/videos')
+      .then((res) => res.json())
+      .then((data) => {
+        const vids = data.videos || [];
+        setVideos(vids);
+        if (urlVideoId) {
+          const match = vids.find((v: any) => v.id === urlVideoId);
+          if (match && match.groupId && !urlGroupId) {
+            setSelectedGroupId(match.groupId);
+          }
+        }
+      })
+      .catch((err) => console.error('Failed to load videos:', err));
+
     fetchHistoryCount();
-  }, []);
+  }, [searchParams]);
 
   const samplePrompts = [
     'Episode scene sequence:\n1. Luffy charges with a red fiery fist.\n2. Kaido roars and swings his giant thunder club.\n3. The sky splits open with lightning.',
@@ -172,11 +200,13 @@ export default function GlobalSearchPage() {
     e?: React.FormEvent,
     customQuery?: string,
     customGroup?: string,
+    customVideo?: string,
     forceLive: boolean = true
   ) => {
     if (e) e.preventDefault();
     const q = customQuery !== undefined ? customQuery : query;
     const g = customGroup !== undefined ? customGroup : selectedGroupId;
+    const v = customVideo !== undefined ? customVideo : selectedVideoId;
     if (!q || q.trim() === '') return;
 
     setSearchError(null);
@@ -191,6 +221,7 @@ export default function GlobalSearchPage() {
 
     if (customQuery !== undefined) setQuery(customQuery);
     if (customGroup !== undefined) setSelectedGroupId(customGroup);
+    if (customVideo !== undefined) setSelectedVideoId(customVideo);
     setIsSearching(true);
     setHasSearched(true);
     setActiveHistoryId(null);
@@ -204,6 +235,7 @@ export default function GlobalSearchPage() {
           autoVerify: true,
           limit: 20,
           groupId: g !== 'all' ? g : undefined,
+          videoId: v !== 'all' ? v : undefined,
           forceLive,
         }),
       });
@@ -239,11 +271,13 @@ export default function GlobalSearchPage() {
     setSegments([]);
     setSearchError(null);
 
-    // Immediately reflect selected query and group in UI
+    // Immediately reflect selected query, group, and video in UI
     if (historyItem) {
       setQuery(historyItem.query);
       if (historyItem.groupId) setSelectedGroupId(historyItem.groupId);
       else setSelectedGroupId('all');
+      if (historyItem.videoId) setSelectedVideoId(historyItem.videoId);
+      else setSelectedVideoId('all');
     }
 
     try {
@@ -256,6 +290,7 @@ export default function GlobalSearchPage() {
       if (s) {
         setQuery(s.query);
         setSelectedGroupId(s.groupId || 'all');
+        setSelectedVideoId(s.videoId || 'all');
         setActiveHistoryId(s.id);
 
         if (s.results && Array.isArray(s.results) && s.results.length > 0) {
@@ -270,7 +305,7 @@ export default function GlobalSearchPage() {
         } else {
           // Older history item without cached results snapshot:
           // Automatically execute live search so results load for the user!
-          await handleSearch(undefined, s.query, s.groupId || 'all');
+          await handleSearch(undefined, s.query, s.groupId || 'all', s.videoId || 'all');
         }
       } else {
         throw new Error('Search record empty');
@@ -288,6 +323,7 @@ export default function GlobalSearchPage() {
   };
 
   const activeGroup = groups.find((g) => g.id === selectedGroupId);
+  const activeVideo = videos.find((v) => v.id === selectedVideoId);
   const activeSegment = segments.find((s) => s.id === selectedSegmentId);
 
   // Filtered results based on selected segment
@@ -306,7 +342,7 @@ export default function GlobalSearchPage() {
             <span>Cross-Video Semantic Search</span>
           </h1>
           <p className="text-slate-400 text-sm mt-1">
-            Search across every indexed video or filter queries inside a specific TV show or episode group.
+            Search across every indexed video, filter queries inside a TV show, or narrow down to a specific episode.
           </p>
         </div>
 
@@ -356,29 +392,145 @@ export default function GlobalSearchPage() {
         </div>
       )}
 
-
-      {/* Query Bar & Group Filter */}
+      {/* Query Bar & Filters */}
       <div className="glass-panel p-6 rounded-3xl border border-slate-800 space-y-4">
-        <form onSubmit={handleSearch} className="flex flex-col sm:flex-row gap-3 items-start">
-          {/* Group Scope Selector */}
-          <GroupSelectDropdown
-            groups={groups}
-            selectedGroupId={selectedGroupId}
-            onSelectGroup={(id) => {
-              setSelectedGroupId(id);
-              if (query.trim() && !isOverLimit) {
-                handleSearch(undefined, undefined, id);
-              }
-            }}
-            allLabel="All Shows & Videos"
-            allValue="all"
-            icon="film"
-            className="shrink-0 min-w-[210px] h-[52px]"
-          />
+        {/* Active Scope Indicators */}
+        {(selectedGroupId !== 'all' || selectedVideoId !== 'all') && (
+          <div className="flex flex-wrap items-center gap-2 p-2.5 rounded-2xl bg-slate-900/60 border border-slate-800 text-xs animate-in fade-in">
+            <span className="text-slate-400 font-medium flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-blue-400" />
+              <span>Scope:</span>
+            </span>
 
-          {/* Search Query Multi-line Input */}
-          <div className="relative flex-1 w-full sm:w-auto">
-            <Search className="w-5 h-5 text-slate-400 absolute left-4 top-4 pointer-events-none" />
+            {activeGroup && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 font-medium">
+                <Folder className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Show: <strong>{activeGroup.name}</strong></span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedGroupId('all');
+                  }}
+                  className="p-0.5 hover:bg-indigo-500/30 rounded text-indigo-300 hover:text-white transition-colors ml-0.5"
+                  title="Remove show filter"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            )}
+
+            {activeVideo && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-blue-500/15 border border-blue-500/30 text-blue-300 font-medium">
+                <Film className="w-3.5 h-3.5 text-blue-400" />
+                <span className="truncate max-w-[240px]">Video: <strong>{activeVideo.filename}</strong></span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedVideoId('all')}
+                  className="p-0.5 hover:bg-blue-500/30 rounded text-blue-300 hover:text-white transition-colors ml-0.5"
+                  title="Remove video filter"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            )}
+
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedGroupId('all');
+                setSelectedVideoId('all');
+              }}
+              className="text-slate-400 hover:text-slate-200 hover:underline text-[11px] ml-auto"
+            >
+              Reset to All Videos
+            </button>
+          </div>
+        )}
+
+        <form onSubmit={handleSearch} className="flex flex-col lg:flex-row gap-3.5 lg:items-stretch">
+          {/* Scope Selectors: Vertically Stacked (Fixed height & independent of search box size) */}
+          <div className="flex flex-col gap-2.5 w-full lg:w-[280px] shrink-0 p-3.5 rounded-2xl bg-slate-900/50 border border-slate-800 shadow-sm">
+            {/* Show / Group Selector */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between px-0.5">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                  <Folder className="w-3 h-3 text-indigo-400" />
+                  <span>Show / Group</span>
+                </span>
+                {selectedGroupId !== 'all' && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedGroupId('all')}
+                    className="text-[10px] font-medium text-indigo-400 hover:text-indigo-300 transition-colors"
+                  >
+                    All Shows
+                  </button>
+                )}
+              </div>
+              <GroupSelectDropdown
+                groups={groups}
+                selectedGroupId={selectedGroupId}
+                onSelectGroup={(id) => {
+                  setSelectedGroupId(id);
+                  // If selected video is not in this new group, reset video selection
+                  if (id !== 'all' && selectedVideoId !== 'all') {
+                    const vid = videos.find((v) => v.id === selectedVideoId);
+                    if (vid && vid.groupId !== id) {
+                      setSelectedVideoId('all');
+                    }
+                  }
+                }}
+                allLabel="All Shows & Groups"
+                allValue="all"
+                icon="film"
+                className="w-full"
+                menuWidth="w-full min-w-[260px]"
+              />
+            </div>
+
+            <div className="h-px bg-slate-800/80" />
+
+            {/* Video / Episode Selector */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between px-0.5">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                  <Film className="w-3 h-3 text-blue-400" />
+                  <span>Video in Scope</span>
+                </span>
+                {selectedVideoId !== 'all' && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedVideoId('all')}
+                    className="text-[10px] font-medium text-blue-400 hover:text-blue-300 transition-colors"
+                  >
+                    All Videos
+                  </button>
+                )}
+              </div>
+              <VideoSelectDropdown
+                videos={videos}
+                selectedVideoId={selectedVideoId}
+                selectedGroupId={selectedGroupId}
+                onSelectVideo={(id) => {
+                  setSelectedVideoId(id);
+                  if (id !== 'all') {
+                    const vid = videos.find((v) => v.id === id);
+                    if (vid && vid.groupId && vid.groupId !== selectedGroupId) {
+                      setSelectedGroupId(vid.groupId);
+                    }
+                  }
+                }}
+                allLabel="All Videos in Scope"
+                allValue="all"
+                className="w-full"
+                menuWidth="w-full min-w-[260px]"
+              />
+            </div>
+          </div>
+
+          {/* Search Query Multi-line Input with capped height and internal scrolling */}
+          <div className="relative flex-1 w-full min-w-0 flex flex-col">
+            <Search className="w-5 h-5 text-slate-400 absolute left-4 top-4 pointer-events-none z-10" />
             <textarea
               value={query}
               onChange={(e) => {
@@ -393,13 +545,15 @@ export default function GlobalSearchPage() {
                   }
                 }
               }}
-              rows={query.includes('\n') || query.length > 80 ? 4 : 2}
+              rows={query.split('\n').length > 3 ? Math.min(query.split('\n').length, 7) : 4}
               placeholder={
-                activeGroup
+                activeVideo
+                  ? `Search scenes inside "${activeVideo.filename}" (e.g. actions, characters, dialogue)...`
+                  : activeGroup
                   ? `Search inside "${activeGroup.name}" episodes (e.g. multi-line prompt, scene descriptions)...`
                   : 'Search all videos (e.g. paste 7-8 lines of sequence descriptions, or single actions)...'
               }
-              className={`w-full pl-12 pr-4 py-3 bg-slate-950/80 border rounded-2xl text-white placeholder-slate-500 text-sm focus:outline-none shadow-inner transition-colors resize-y min-h-[52px] leading-relaxed ${
+              className={`w-full h-full pl-12 pr-4 py-3.5 bg-slate-950/80 border rounded-2xl text-white placeholder-slate-500 text-sm focus:outline-none shadow-inner transition-colors min-h-[128px] max-h-[220px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-950 leading-relaxed resize-none ${
                 isOverLimit
                   ? 'border-rose-500/80 focus:border-rose-400 focus:ring-1 focus:ring-rose-500/30'
                   : isNearLimit
@@ -409,15 +563,37 @@ export default function GlobalSearchPage() {
             />
           </div>
 
-          {/* Submit Button - Fixed height so it never stretches with textarea */}
-          <button
-            type="submit"
-            disabled={isSearching || !query.trim() || isOverLimit}
-            className="px-6 h-[52px] bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold text-sm rounded-2xl shadow-lg shadow-blue-500/20 transition-all flex items-center justify-center space-x-2 shrink-0 self-stretch sm:self-start"
-          >
-            {isSearching ? <RefreshCw className="w-4 h-4 animate-spin text-white" /> : <Search className="w-4 h-4" />}
-            <span>{isSearching ? 'Searching...' : 'Search'}</span>
-          </button>
+          {/* Search & Reset Buttons — stacked, equal height */}
+          <div className="flex flex-row lg:flex-col gap-1.5 w-full lg:w-28 shrink-0">
+            <button
+              type="submit"
+              disabled={isSearching || !query.trim() || isOverLimit}
+              className="px-4 h-[52px] lg:flex-1 w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold text-sm rounded-2xl shadow-lg shadow-blue-500/20 transition-all flex flex-row lg:flex-col items-center justify-center gap-1.5"
+            >
+              {isSearching ? <RefreshCw className="w-5 h-5 animate-spin text-white" /> : <Search className="w-5 h-5" />}
+              <span>{isSearching ? 'Searching...' : 'Search'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setQuery('');
+                setSelectedGroupId('all');
+                setSelectedVideoId('all');
+                setResults([]);
+                setSegments([]);
+                setSelectedSegmentId('all');
+                setHasSearched(false);
+                setSearchError(null);
+                setActiveHistoryId(null);
+              }}
+              disabled={!query && selectedGroupId === 'all' && selectedVideoId === 'all' && results.length === 0}
+              className="px-4 h-[52px] lg:flex-1 w-full bg-slate-800/80 hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed text-slate-300 hover:text-white font-medium text-xs rounded-2xl border border-slate-700/60 hover:border-slate-600 transition-all flex flex-row lg:flex-col items-center justify-center gap-1.5"
+            >
+              <RefreshCw className="w-4 h-4" />
+              <span>Reset</span>
+            </button>
+          </div>
         </form>
 
         {/* Prompt Limit & Token Status Bar */}
@@ -489,58 +665,7 @@ export default function GlobalSearchPage() {
           </div>
         )}
 
-        {/* Active Scope Filter Indicator */}
-        {selectedGroupId !== 'all' && (
-          <div className="flex items-center space-x-2 text-xs text-indigo-300 bg-indigo-950/40 border border-indigo-500/30 rounded-xl px-3 py-1.5 w-fit">
-            <Folder className="w-3.5 h-3.5 text-indigo-400" />
-            <span>
-              Searching exclusively within <strong>{activeGroup?.name}</strong>
-            </span>
-            <button
-              onClick={() => {
-                setSelectedGroupId('all');
-                if (query.trim() && !isOverLimit) {
-                  handleSearch(undefined, undefined, 'all');
-                }
-              }}
-              className="hover:text-white p-0.5 rounded-full hover:bg-indigo-800/50 transition-colors ml-1"
-              title="Clear group filter"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        )}
 
-        {/* Restored Historical Search Banner */}
-        {activeHistoryId && (
-          <div className="flex items-center justify-between gap-3 text-xs text-blue-300 bg-blue-950/40 border border-blue-500/30 rounded-2xl px-4 py-2.5">
-            <div className="flex items-center space-x-2">
-              <History className="w-4 h-4 text-blue-400 shrink-0" />
-              <span>
-                Viewing restored results from <strong>Search History</strong>
-              </span>
-            </div>
-            <div className="flex items-center space-x-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => handleSearch(undefined, query, selectedGroupId, true)}
-                className="px-2.5 py-1 rounded-lg bg-blue-600/80 hover:bg-blue-600 text-white font-semibold transition-colors flex items-center space-x-1"
-                title="Re-run this query live with fresh AI vector search"
-              >
-                <RefreshCw className="w-3 h-3" />
-                <span>Re-run Live</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveHistoryId(null)}
-                className="hover:text-white p-1 rounded-lg hover:bg-blue-900/50 transition-colors"
-                title="Dismiss"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
-        )}
 
         {/* Suggested Prompts */}
         <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -969,6 +1094,14 @@ export default function GlobalSearchPage() {
         currentSearchId={activeHistoryId}
       />
     </div>
+  );
+}
+
+export default function GlobalSearchPage() {
+  return (
+    <Suspense fallback={<div className="p-12 text-center text-slate-400">Loading cross-video search...</div>}>
+      <GlobalSearchContent />
+    </Suspense>
   );
 }
 

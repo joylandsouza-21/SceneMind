@@ -127,7 +127,7 @@ export default function IndexExplorerPage({ params }: { params: { id: string } }
 
         <div className="flex items-center space-x-3">
           <Link
-            href={`/videos/${params.id}/search`}
+            href={`/search?videoId=${params.id}`}
             className="flex items-center space-x-2 px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-xl shadow-md transition-all"
           >
             <Search className="w-3.5 h-3.5" />

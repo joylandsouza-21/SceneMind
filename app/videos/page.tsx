@@ -573,6 +573,33 @@ export default function VideosPage() {
           )}
         </div>
 
+        {/* Active Group / Show Search Action Bar */}
+        {activeGroupId !== 'all' && (
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-gradient-to-r from-indigo-950/40 via-blue-950/30 to-slate-900/40 border border-indigo-500/30 text-xs animate-in fade-in">
+            <div className="flex items-center space-x-2.5">
+              <div className="w-7 h-7 rounded-lg bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+                <Folder className="w-3.5 h-3.5" />
+              </div>
+              <div>
+                <span className="text-slate-300">
+                  Selected Show: <strong className="text-white">{groups.find((g) => g.id === activeGroupId)?.name}</strong>
+                </span>
+                <span className="text-slate-500 ml-2">
+                  ({displayedVideos.length} {displayedVideos.length === 1 ? 'episode' : 'episodes'})
+                </span>
+              </div>
+            </div>
+
+            <Link
+              href={`/search?groupId=${activeGroupId}`}
+              className="flex items-center justify-center space-x-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shadow-md shadow-indigo-500/20 transition-all shrink-0 group"
+            >
+              <Search className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" />
+              <span>Group Search in {groups.find((g) => g.id === activeGroupId)?.name || 'Show'}</span>
+            </Link>
+          </div>
+        )}
+
         {loading ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {Array.from({ length: 3 }).map((_, i) => (
@@ -726,8 +753,9 @@ export default function VideosPage() {
                         </Link>
 
                         <Link
-                          href={`/videos/${video.id}/search`}
+                          href={`/search?videoId=${video.id}${video.groupId ? `&groupId=${video.groupId}` : ''}`}
                           className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600 text-indigo-400 hover:text-white text-xs font-semibold border border-indigo-500/30 transition-all"
+                          title={`Search inside ${video.filename} in Global Search`}
                         >
                           <Search className="w-3.5 h-3.5" />
                           <span>Search</span>

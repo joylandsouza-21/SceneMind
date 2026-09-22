@@ -8,7 +8,7 @@ import { timestampVerificationService } from '@/lib/services/timestamp-verificat
 
 export async function POST(req: NextRequest) {
   try {
-    const { query, autoVerify = true, limit = 15, groupId, forceLive = false } = await req.json();
+    const { query, autoVerify = true, limit = 15, groupId, videoId, forceLive = false } = await req.json();
 
     if (!query || typeof query !== 'string' || query.trim() === '') {
       return NextResponse.json({ error: 'Search query is required' }, { status: 400 });
@@ -24,9 +24,13 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // Check if we already have cached results for this exact query and group scope
+    // Check if we already have cached results for this exact query, group, and video scope
     if (!forceLive) {
-      const cachedSearch = db.findCachedSearch(trimmedQuery, groupId && groupId !== 'all' ? groupId : undefined);
+      const cachedSearch = db.findCachedSearch(
+        trimmedQuery,
+        groupId && groupId !== 'all' ? groupId : undefined,
+        videoId && videoId !== 'all' ? videoId : undefined
+      );
       if (cachedSearch && cachedSearch.results && cachedSearch.results.length > 0) {
         const hydratedResults = cachedSearch.results.map((res: any) => {
           if (!res.videoStoragePath && res.videoId) {
@@ -52,7 +56,9 @@ export async function POST(req: NextRequest) {
     }
 
     let videoIdFilter: string[] | undefined = undefined;
-    if (groupId && groupId !== 'all') {
+    if (videoId && videoId !== 'all') {
+      videoIdFilter = [videoId];
+    } else if (groupId && groupId !== 'all') {
       const groupVideos = db.getVideos(groupId);
       videoIdFilter = groupVideos.map((v) => v.id);
       if (videoIdFilter.length === 0) {
@@ -241,6 +247,7 @@ export async function POST(req: NextRequest) {
       query: trimmedQuery,
       groupId: groupId && groupId !== 'all' ? groupId : undefined,
       groupName: targetGroup?.name,
+      videoId: videoId && videoId !== 'all' ? videoId : undefined,
       resultCount: results.length,
       results,
       segments: segmentSummaries,
