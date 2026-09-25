@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db/store';
+import { db } from '@/lib/db';
 import { embeddingService } from '@/lib/services/embedding.service';
 import { vectorService } from '@/lib/services/vector.service';
 

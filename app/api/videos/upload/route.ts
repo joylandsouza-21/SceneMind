@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
-import { db } from '@/lib/db/store';
+import { db } from '@/lib/db';
 import { Video } from '@/lib/db/types';
 import { storageService } from '@/lib/services/storage.service';
 import { ffmpegService } from '@/lib/services/ffmpeg.service';

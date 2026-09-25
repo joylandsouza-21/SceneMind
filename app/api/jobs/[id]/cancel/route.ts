@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { jobQueueService } from '@/lib/services/job-queue.service';
-import { db } from '@/lib/db/store';
+import { db } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 

@@ -1,4 +1,4 @@
-import { db } from '../db/store';
+import { db } from '../db';
 import { VectorRecord } from '../db/types';
 import { embeddingService } from './embedding.service';
 import { v4 as uuidv4 } from 'uuid';

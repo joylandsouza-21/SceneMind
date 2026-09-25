@@ -1,30 +1,46 @@
 -- ==============================================================================
 -- SceneMind AI Database Initialization Script
--- Enables pgvector extension and creates initial database schemas
+-- PostgreSQL 16 with pgvector extension
 -- ==============================================================================
 
--- 1. Enable pgvector extension for semantic embedding similarity searches
+-- 1. Enable required extensions
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- 2. Videos table
+-- 2. Groups table
+CREATE TABLE IF NOT EXISTS groups_ (
+    id VARCHAR(64) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    color VARCHAR(32),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. Videos table
 CREATE TABLE IF NOT EXISTS videos (
     id VARCHAR(64) PRIMARY KEY,
-    filename VARCHAR(255) NOT NULL,
+    filename VARCHAR(512) NOT NULL,
+    original_name VARCHAR(512) NOT NULL,
     storage_path TEXT NOT NULL,
-    file_size BIGINT NOT NULL,
     duration DOUBLE PRECISION NOT NULL DEFAULT 0,
     width INT DEFAULT 1920,
     height INT DEFAULT 1080,
     fps DOUBLE PRECISION DEFAULT 30,
-    status VARCHAR(32) NOT NULL DEFAULT 'uploaded',
+    format VARCHAR(32) DEFAULT 'mp4',
+    size_bytes BIGINT DEFAULT 0,
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
     processing_progress INT DEFAULT 0,
-    group_name VARCHAR(128),
-    uploaded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    indexed_at TIMESTAMP WITH TIME ZONE
+    group_id VARCHAR(64) REFERENCES groups_(id) ON DELETE SET NULL,
+    group_name VARCHAR(255),
+    error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_videos_group ON videos(group_id);
+CREATE INDEX IF NOT EXISTS idx_videos_status ON videos(status);
 
--- 3. Scenes table with vector embeddings
+-- 4. Scenes table with vector embeddings
 CREATE TABLE IF NOT EXISTS scenes (
     id VARCHAR(64) PRIMARY KEY,
     video_id VARCHAR(64) NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
@@ -33,24 +49,34 @@ CREATE TABLE IF NOT EXISTS scenes (
     end_time DOUBLE PRECISION NOT NULL,
     duration DOUBLE PRECISION NOT NULL,
     description TEXT NOT NULL,
-    actions TEXT[] DEFAULT '{}',
-    objects TEXT[] DEFAULT '{}',
-    location VARCHAR(255),
-    people TEXT[] DEFAULT '{}',
+    actions JSONB DEFAULT '[]',
+    objects JSONB DEFAULT '[]',
+    people JSONB DEFAULT '[]',
+    location VARCHAR(255) DEFAULT '',
+    events JSONB DEFAULT '[]',
     confidence DOUBLE PRECISION DEFAULT 1.0,
-    embedding vector(768), -- Gemini text-embedding dimension
-    verified_start_time DOUBLE PRECISION,
-    verified_end_time DOUBLE PRECISION,
-    is_verified BOOLEAN DEFAULT FALSE,
-    verification_reason TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    embedding_id VARCHAR(64) DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_scenes_video ON scenes(video_id);
+CREATE INDEX IF NOT EXISTS idx_scenes_start ON scenes(start_time);
 
--- Index on scenes start_time, video_id, and vector cosine similarity
-CREATE INDEX IF NOT EXISTS idx_scenes_video_id ON scenes(video_id);
-CREATE INDEX IF NOT EXISTS idx_scenes_start_time ON scenes(start_time);
+-- 5. Searches table
+CREATE TABLE IF NOT EXISTS searches (
+    id VARCHAR(64) PRIMARY KEY,
+    video_id VARCHAR(64),
+    group_id VARCHAR(64),
+    group_name VARCHAR(255),
+    query TEXT NOT NULL,
+    result_count INT DEFAULT 0,
+    results JSONB DEFAULT '[]',
+    segments JSONB DEFAULT '[]',
+    is_segmented BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_searches_created ON searches(created_at DESC);
 
--- 4. Clips table
+-- 6. Clips table
 CREATE TABLE IF NOT EXISTS clips (
     id VARCHAR(64) PRIMARY KEY,
     video_id VARCHAR(64) NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
@@ -60,36 +86,57 @@ CREATE TABLE IF NOT EXISTS clips (
     end_time DOUBLE PRECISION NOT NULL,
     duration DOUBLE PRECISION NOT NULL,
     output_path TEXT NOT NULL,
-    status VARCHAR(32) NOT NULL DEFAULT 'completed',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    progress INT DEFAULT 0,
+    error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_clips_video ON clips(video_id);
 
-CREATE INDEX IF NOT EXISTS idx_clips_video_id ON clips(video_id);
-
--- 5. Search History table
-CREATE TABLE IF NOT EXISTS search_history (
-    id VARCHAR(64) PRIMARY KEY,
-    query TEXT NOT NULL,
-    group_name VARCHAR(128),
-    filter_verified BOOLEAN DEFAULT FALSE,
-    min_confidence DOUBLE PRECISION DEFAULT 0.0,
-    prompt_segments JSONB DEFAULT '[]',
-    results JSONB DEFAULT '[]',
-    result_count INT DEFAULT 0,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_search_history_created_at ON search_history(created_at DESC);
-
--- 6. Processing Jobs table
+-- 7. Processing Jobs table
 CREATE TABLE IF NOT EXISTS jobs (
     id VARCHAR(64) PRIMARY KEY,
     video_id VARCHAR(64) NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
-    type VARCHAR(32) NOT NULL DEFAULT 'index',
+    job_type VARCHAR(64) NOT NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'pending',
     progress INT DEFAULT 0,
-    current_step TEXT,
+    current_step TEXT DEFAULT '',
+    total_steps INT DEFAULT 0,
+    retry_count INT DEFAULT 0,
     error TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_jobs_video ON jobs(video_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+
+-- 8. AI Costs table
+CREATE TABLE IF NOT EXISTS costs (
+    id VARCHAR(64) PRIMARY KEY,
+    video_id VARCHAR(64),
+    scene_id VARCHAR(64),
+    model VARCHAR(128) NOT NULL,
+    input_tokens INT DEFAULT 0,
+    output_tokens INT DEFAULT 0,
+    estimated_cost DOUBLE PRECISION DEFAULT 0,
+    processing_time_ms INT DEFAULT 0,
+    request_type VARCHAR(64) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_costs_video ON costs(video_id);
+
+-- 9. Vector Embeddings table (pgvector)
+CREATE TABLE IF NOT EXISTS vectors (
+    id VARCHAR(64) PRIMARY KEY,
+    scene_id VARCHAR(64) NOT NULL,
+    video_id VARCHAR(64) NOT NULL,
+    embedding vector(768),
+    text TEXT NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_vectors_video ON vectors(video_id);
+CREATE INDEX IF NOT EXISTS idx_vectors_scene ON vectors(scene_id);
+
+-- HNSW index for fast cosine similarity search on embeddings
+-- CREATE INDEX IF NOT EXISTS idx_vectors_embedding ON vectors USING hnsw (embedding vector_cosine_ops);

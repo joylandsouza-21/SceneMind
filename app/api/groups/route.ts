@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
-import { db } from '@/lib/db/store';
+import { db } from '@/lib/db';
 import { VideoGroup } from '@/lib/db/types';
 
 export const dynamic = 'force-dynamic';

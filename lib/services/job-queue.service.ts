@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
-import { db } from '../db/store';
+import { db } from '../db';
 import { JobType, JobStatus, ProcessingJob, VideoScene, Video } from '../db/types';
 import { ffmpegService } from './ffmpeg.service';
 import { storageService } from './storage.service';

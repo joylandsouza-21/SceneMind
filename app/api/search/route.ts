@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
-import { db } from '@/lib/db/store';
+import { db } from '@/lib/db';
 import { VideoSearch } from '@/lib/db/types';
 import { embeddingService, segmentPrompt, PromptSegment } from '@/lib/services/embedding.service';
 import { vectorService } from '@/lib/services/vector.service';

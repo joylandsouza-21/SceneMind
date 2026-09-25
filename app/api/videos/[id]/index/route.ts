@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db/store';
+import { db } from '@/lib/db';
 import { jobQueueService } from '@/lib/services/job-queue.service';
 
 export async function POST(

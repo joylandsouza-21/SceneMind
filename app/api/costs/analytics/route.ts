@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/db/store';
+import { db } from '@/lib/db';
 import { AiCost, Video } from '@/lib/db/types';
 
 export const dynamic = 'force-dynamic';

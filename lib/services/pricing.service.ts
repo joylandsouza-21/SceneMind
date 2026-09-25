@@ -1,4 +1,4 @@
-import { db } from '../db/store';
+import { db } from '../db';
 import { AiCost } from '../db/types';
 import { v4 as uuidv4 } from 'uuid';
 
