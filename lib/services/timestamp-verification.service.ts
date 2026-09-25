@@ -81,6 +81,7 @@ export class TimestampVerificationService {
     if (config.provider === 'anthropic' && config.apiKey) {
       try {
         const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/v1/messages` : 'https://api.anthropic.com/v1/messages';
+        const modelId = normalizeAnthropicModel(config.modelName, 'claude-3-5-sonnet-20241022');
         const res = await fetch(url, {
           method: 'POST',
           headers: {
@@ -89,7 +90,7 @@ export class TimestampVerificationService {
             'anthropic-version': '2023-06-01',
           },
           body: JSON.stringify({
-            model: normalizeAnthropicModel(config.modelName, 'claude-3-5-sonnet-20241022'),
+            model: modelId,
             system: TIMESTAMP_VERIFICATION_SYSTEM_PROMPT,
             messages: [{ role: 'user', content: prompt + '\nRespond with valid JSON only.' }],
             max_tokens: 300,
@@ -102,11 +103,27 @@ export class TimestampVerificationService {
           const text = data.content?.[0]?.text || '';
           const latencyMs = Date.now() - startTimeMs;
           const parsed = this.parseVerificationResponse(text, params.candidateStart, params.candidateEnd);
+          
+          const inputTokens = data.usage?.input_tokens || (Math.round(prompt.length / 4) + 120);
+          const outputTokens = data.usage?.output_tokens || Math.round(text.length / 4);
+          const estimatedCost = pricingService.calculateTextAiCost(modelId, inputTokens, outputTokens);
+
+          pricingService.recordOperationCost({
+            videoId: params.videoId,
+            sceneId: params.sceneId,
+            model: modelId,
+            inputTokens,
+            outputTokens,
+            estimatedCost,
+            processingTimeMs: latencyMs,
+            requestType: 'TIMESTAMP_VERIFICATION',
+          });
+
           return {
             ...parsed,
             latencyMs,
-            estimatedCost: 0.0008,
-            model: config.modelName,
+            estimatedCost,
+            model: modelId,
           };
         }
       } catch (err: any) {
@@ -125,6 +142,7 @@ export class TimestampVerificationService {
           ? 'http://localhost:11434/v1/chat/completions'
           : 'https://api.openai.com/v1/chat/completions';
 
+        const activeModel = config.modelName || (config.provider === 'groq' ? 'llama-3.3-70b-versatile' : 'gpt-4o-mini');
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (config.apiKey && config.provider !== 'ollama') {
           headers['Authorization'] = `Bearer ${config.apiKey}`;
@@ -134,7 +152,7 @@ export class TimestampVerificationService {
           method: 'POST',
           headers,
           body: JSON.stringify({
-            model: config.modelName || (config.provider === 'groq' ? 'llama-3.3-70b-versatile' : 'gpt-4o-mini'),
+            model: activeModel,
             messages: [
               { role: 'system', content: TIMESTAMP_VERIFICATION_SYSTEM_PROMPT },
               { role: 'user', content: prompt + '\nReturn JSON only.' }
@@ -150,11 +168,27 @@ export class TimestampVerificationService {
           const text = data.choices?.[0]?.message?.content || '';
           const latencyMs = Date.now() - startTimeMs;
           const parsed = this.parseVerificationResponse(text, params.candidateStart, params.candidateEnd);
+          
+          const inputTokens = data.usage?.prompt_tokens || (Math.round(prompt.length / 4) + 120);
+          const outputTokens = data.usage?.completion_tokens || Math.round(text.length / 4);
+          const estimatedCost = pricingService.calculateTextAiCost(activeModel, inputTokens, outputTokens);
+
+          pricingService.recordOperationCost({
+            videoId: params.videoId,
+            sceneId: params.sceneId,
+            model: activeModel,
+            inputTokens,
+            outputTokens,
+            estimatedCost,
+            processingTimeMs: latencyMs,
+            requestType: 'TIMESTAMP_VERIFICATION',
+          });
+
           return {
             ...parsed,
             latencyMs,
-            estimatedCost: 0.0003,
-            model: config.modelName,
+            estimatedCost,
+            model: activeModel,
           };
         }
       } catch (err: any) {

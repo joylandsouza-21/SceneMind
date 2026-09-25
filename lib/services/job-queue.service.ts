@@ -7,6 +7,7 @@ import { storageService } from './storage.service';
 import { videoAnalysisService } from './video-analysis.service';
 import { embeddingService } from './embedding.service';
 import { vectorService } from './vector.service';
+import { aiConfigService } from './ai-config.service';
 
 export interface JobEventPayload {
   jobId: string;
@@ -346,12 +347,22 @@ class JobQueueService extends EventEmitter {
 
       // --- STEP 4: Vector Embeddings Generation ---
       const totalScenes = scenes.length;
+      const embedConfig = aiConfigService.getEffectiveConfig('embedding');
+      const embedProviderLabel =
+        embedConfig.provider === 'anthropic' ? 'Anthropic Claude'
+        : embedConfig.provider === 'voyage' ? 'Voyage AI'
+        : embedConfig.provider === 'openai' ? 'OpenAI'
+        : embedConfig.provider === 'cohere' ? 'Cohere'
+        : embedConfig.provider === 'mistral' ? 'Mistral'
+        : embedConfig.provider === 'ollama' ? 'Ollama'
+        : 'Google Gemini';
+
       this.appendJobLog(
         job.id,
-        `⚡ [4/6] Generating text & visual vector embeddings for ${totalScenes} scenes for semantic AI search...`,
+        `⚡ [4/6] Generating text & visual vector embeddings for ${totalScenes} scenes using ${embedProviderLabel} (${embedConfig.modelName || embedConfig.provider})...`,
         {
           progress: 65,
-          currentStep: `Generating vector embeddings (0/${totalScenes})`,
+          currentStep: `Generating vector embeddings via ${embedProviderLabel} (0/${totalScenes})`,
         }
       );
 

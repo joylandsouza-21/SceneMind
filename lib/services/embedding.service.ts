@@ -217,12 +217,13 @@ export class EmbeddingService {
 
           const vector = this.computeLocalSemanticVector(text, 768, weightedTerms);
           const latencyMs = Date.now() - start;
-          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate);
+          const activeModel = config.modelName || 'claude-3-5-haiku-20241022';
+          const cost = pricingService.calculateTextAiCost(activeModel, tokenCountEstimate, 50);
 
           pricingService.recordOperationCost({
             videoId: context?.videoId,
             sceneId: context?.sceneId,
-            model: config.modelName || 'claude-3-5-haiku',
+            model: activeModel,
             inputTokens: tokenCountEstimate,
             outputTokens: 50,
             estimatedCost: cost,
@@ -246,6 +247,7 @@ export class EmbeddingService {
     if (config.provider === 'voyage' && config.apiKey) {
       try {
         const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/embeddings` : 'https://api.voyageai.com/v1/embeddings';
+        const modelName = config.modelName || 'voyage-3';
         const res = await fetch(url, {
           method: 'POST',
           headers: {
@@ -253,7 +255,7 @@ export class EmbeddingService {
             'Authorization': `Bearer ${config.apiKey}`,
           },
           body: JSON.stringify({
-            model: config.modelName || 'voyage-3',
+            model: modelName,
             input: text,
             output_dimension: 768,
           }),
@@ -270,7 +272,17 @@ export class EmbeddingService {
           }
 
           const latencyMs = Date.now() - start;
-          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate);
+          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate, modelName);
+          pricingService.recordOperationCost({
+            videoId: context?.videoId,
+            sceneId: context?.sceneId,
+            model: modelName,
+            inputTokens: tokenCountEstimate,
+            outputTokens: 0,
+            estimatedCost: cost,
+            processingTimeMs: latencyMs,
+            requestType: 'EMBEDDING',
+          });
           return { embedding: vector, dimensions: vector.length, cost, latencyMs };
         }
       } catch (err: any) {
@@ -282,6 +294,7 @@ export class EmbeddingService {
     if (config.provider === 'cohere' && config.apiKey) {
       try {
         const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/embed` : 'https://api.cohere.com/v1/embed';
+        const modelName = config.modelName || 'embed-english-v3.0';
         const res = await fetch(url, {
           method: 'POST',
           headers: {
@@ -289,7 +302,7 @@ export class EmbeddingService {
             'Authorization': `Bearer ${config.apiKey}`,
           },
           body: JSON.stringify({
-            model: config.modelName || 'embed-english-v3.0',
+            model: modelName,
             texts: [text],
             input_type: 'search_document',
           }),
@@ -306,7 +319,17 @@ export class EmbeddingService {
           }
 
           const latencyMs = Date.now() - start;
-          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate);
+          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate, modelName);
+          pricingService.recordOperationCost({
+            videoId: context?.videoId,
+            sceneId: context?.sceneId,
+            model: modelName,
+            inputTokens: tokenCountEstimate,
+            outputTokens: 0,
+            estimatedCost: cost,
+            processingTimeMs: latencyMs,
+            requestType: 'EMBEDDING',
+          });
           return { embedding: vector, dimensions: vector.length, cost, latencyMs };
         }
       } catch (err: any) {
@@ -318,6 +341,7 @@ export class EmbeddingService {
     if (config.provider === 'mistral' && config.apiKey) {
       try {
         const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/embeddings` : 'https://api.mistral.ai/v1/embeddings';
+        const modelName = config.modelName || 'mistral-embed';
         const res = await fetch(url, {
           method: 'POST',
           headers: {
@@ -325,7 +349,7 @@ export class EmbeddingService {
             'Authorization': `Bearer ${config.apiKey}`,
           },
           body: JSON.stringify({
-            model: config.modelName || 'mistral-embed',
+            model: modelName,
             input: [text],
           }),
         });
@@ -341,7 +365,17 @@ export class EmbeddingService {
           }
 
           const latencyMs = Date.now() - start;
-          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate);
+          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate, modelName);
+          pricingService.recordOperationCost({
+            videoId: context?.videoId,
+            sceneId: context?.sceneId,
+            model: modelName,
+            inputTokens: tokenCountEstimate,
+            outputTokens: 0,
+            estimatedCost: cost,
+            processingTimeMs: latencyMs,
+            requestType: 'EMBEDDING',
+          });
           return { embedding: vector, dimensions: vector.length, cost, latencyMs };
         }
       } catch (err: any) {
@@ -363,9 +397,10 @@ export class EmbeddingService {
           headers['Authorization'] = `Bearer ${config.apiKey}`;
         }
 
+        const modelName = config.modelName || (config.provider === 'ollama' ? 'nomic-embed-text' : 'text-embedding-3-small');
         const body = config.provider === 'ollama'
-          ? { model: config.modelName || 'nomic-embed-text', prompt: text }
-          : { model: config.modelName || 'text-embedding-3-small', input: text, dimensions: 768 };
+          ? { model: modelName, prompt: text }
+          : { model: modelName, input: text, dimensions: 768 };
 
         const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
         if (res.ok) {
@@ -381,7 +416,17 @@ export class EmbeddingService {
           }
 
           const latencyMs = Date.now() - start;
-          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate);
+          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate, modelName);
+          pricingService.recordOperationCost({
+            videoId: context?.videoId,
+            sceneId: context?.sceneId,
+            model: modelName,
+            inputTokens: tokenCountEstimate,
+            outputTokens: 0,
+            estimatedCost: cost,
+            processingTimeMs: latencyMs,
+            requestType: 'EMBEDDING',
+          });
           return {
             embedding: vector,
             dimensions: vector.length,
@@ -397,7 +442,7 @@ export class EmbeddingService {
     // High-dimensional Semantic Local Vectorizer Fallback (768 dimensions)
     const vector = this.computeLocalSemanticVector(text, 768);
     const latencyMs = Date.now() - start;
-    const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate);
+    const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate, 'local-semantic-embedding');
 
     pricingService.recordOperationCost({
       videoId: context?.videoId,

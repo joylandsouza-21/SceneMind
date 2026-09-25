@@ -18,6 +18,41 @@ export const DEFAULT_PRICING: PricingRates = {
   ffmpegComputePerMinute: 0.0004,
 };
 
+export const MODEL_PRICING_RATES: Record<string, { inputPerMillion: number; outputPerMillion: number }> = {
+  // Anthropic Claude
+  'claude-3-5-sonnet-20241022': { inputPerMillion: 3.0, outputPerMillion: 15.0 },
+  'claude-3-5-sonnet-20240620': { inputPerMillion: 3.0, outputPerMillion: 15.0 },
+  'claude-3-5-haiku-20241022': { inputPerMillion: 0.8, outputPerMillion: 4.0 },
+  'claude-3-haiku-20240307': { inputPerMillion: 0.25, outputPerMillion: 1.25 },
+  'claude-3-opus-20240229': { inputPerMillion: 15.0, outputPerMillion: 75.0 },
+  // OpenAI
+  'gpt-4o': { inputPerMillion: 2.5, outputPerMillion: 10.0 },
+  'gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.60 },
+  'o1-mini': { inputPerMillion: 3.0, outputPerMillion: 12.0 },
+  'o3-mini': { inputPerMillion: 1.1, outputPerMillion: 4.4 },
+  // Google Gemini
+  'gemini-2.0-flash': { inputPerMillion: 0.10, outputPerMillion: 0.40 },
+  'gemini-2.0-flash-exp': { inputPerMillion: 0.0, outputPerMillion: 0.0 },
+  'gemini-1.5-flash': { inputPerMillion: 0.075, outputPerMillion: 0.30 },
+  'gemini-1.5-flash-8b': { inputPerMillion: 0.0375, outputPerMillion: 0.15 },
+  'gemini-1.5-pro': { inputPerMillion: 1.25, outputPerMillion: 5.00 },
+  // Groq / Open Source
+  'llama-3.3-70b-versatile': { inputPerMillion: 0.59, outputPerMillion: 0.79 },
+  'llama-3.1-8b-instant': { inputPerMillion: 0.05, outputPerMillion: 0.08 },
+};
+
+export const EMBEDDING_PRICING_RATES: Record<string, number> = {
+  'gemini-embedding-001': 0.02,
+  'text-embedding-004': 0.02,
+  'text-embedding-3-small': 0.02,
+  'text-embedding-3-large': 0.13,
+  'voyage-3': 0.12,
+  'voyage-3-lite': 0.06,
+  'voyage-code-3': 0.12,
+  'claude-3-5-haiku': 0.80,
+  'claude-3-5-sonnet': 3.00,
+};
+
 export class PricingService {
   private rates: PricingRates;
 
@@ -25,20 +60,58 @@ export class PricingService {
     this.rates = rates;
   }
 
-  public calculateTextAiCost(model: string, inputTokens: number, outputTokens: number): number {
-    const inputCost = (inputTokens / 1_000_000) * this.rates.geminiFlashInputPerMillion;
-    const outputCost = (outputTokens / 1_000_000) * this.rates.geminiFlashOutputPerMillion;
+  public calculateTextAiCost(model: string = '', inputTokens: number = 0, outputTokens: number = 0): number {
+    const normalizedModel = (model || '').toLowerCase().trim();
+    
+    // Find matching rate or fallback
+    let rate = MODEL_PRICING_RATES[normalizedModel];
+    if (!rate) {
+      if (normalizedModel.includes('sonnet')) {
+        rate = { inputPerMillion: 3.0, outputPerMillion: 15.0 };
+      } else if (normalizedModel.includes('haiku')) {
+        rate = { inputPerMillion: 0.8, outputPerMillion: 4.0 };
+      } else if (normalizedModel.includes('opus')) {
+        rate = { inputPerMillion: 15.0, outputPerMillion: 75.0 };
+      } else if (normalizedModel.includes('gpt-4o-mini')) {
+        rate = { inputPerMillion: 0.15, outputPerMillion: 0.60 };
+      } else if (normalizedModel.includes('gpt-4o')) {
+        rate = { inputPerMillion: 2.5, outputPerMillion: 10.0 };
+      } else if (normalizedModel.includes('1.5-pro') || normalizedModel.includes('2.0-pro')) {
+        rate = { inputPerMillion: 1.25, outputPerMillion: 5.00 };
+      } else if (normalizedModel.includes('llama')) {
+        rate = { inputPerMillion: 0.59, outputPerMillion: 0.79 };
+      } else if (normalizedModel.includes('ollama') || normalizedModel.includes('local')) {
+        rate = { inputPerMillion: 0.0, outputPerMillion: 0.0 };
+      } else {
+        rate = {
+          inputPerMillion: this.rates.geminiFlashInputPerMillion,
+          outputPerMillion: this.rates.geminiFlashOutputPerMillion,
+        };
+      }
+    }
+
+    const inputCost = (inputTokens / 1_000_000) * rate.inputPerMillion;
+    const outputCost = (outputTokens / 1_000_000) * rate.outputPerMillion;
     return parseFloat((inputCost + outputCost).toFixed(6));
   }
 
-  public calculateEmbeddingCost(tokenCount: number): number {
-    const cost = (tokenCount / 1_000_000) * this.rates.geminiEmbeddingPerMillion;
+  public calculateEmbeddingCost(tokenCount: number, model: string = 'gemini-embedding-001'): number {
+    const normalized = (model || '').toLowerCase().trim();
+    let perMillion = EMBEDDING_PRICING_RATES[normalized];
+    if (perMillion === undefined) {
+      if (normalized.includes('voyage')) perMillion = 0.12;
+      else if (normalized.includes('haiku')) perMillion = 0.80;
+      else if (normalized.includes('sonnet')) perMillion = 3.00;
+      else if (normalized.includes('3-large')) perMillion = 0.13;
+      else perMillion = this.rates.geminiEmbeddingPerMillion;
+    }
+    const cost = (tokenCount / 1_000_000) * perMillion;
     return parseFloat(cost.toFixed(6));
   }
 
-  public calculateVideoAnalysisCost(durationSeconds: number, inputTokens = 0, outputTokens = 0): number {
+  public calculateVideoAnalysisCost(durationSeconds: number, inputTokens = 0, outputTokens = 0, model: string = 'gemini-2.0-flash'): number {
     const baseDurationCost = durationSeconds * this.rates.videoMultimodalPerSecond;
-    const textCost = this.calculateTextAiCost('gemini-flash', inputTokens, outputTokens);
+    const textCost = this.calculateTextAiCost(model, inputTokens, outputTokens);
     return parseFloat((baseDurationCost + textCost).toFixed(6));
   }
 
