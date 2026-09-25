@@ -4,7 +4,7 @@ const nextConfig = {
     serverComponentsExternalPackages: ['uuid', 'better-sqlite3', 'pg', 'pgvector'],
   },
   webpack: (config) => {
-    config.externals = [...(config.externals || []), 'canvas', 'jsdom', 'better-sqlite3', 'pg-native'];
+    config.externals = [...(config.externals || []), 'canvas', 'jsdom', 'better-sqlite3', 'pg-native', 'pg', 'pgvector'];
     return config;
   },
 };

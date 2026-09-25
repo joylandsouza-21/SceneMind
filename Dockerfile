@@ -35,6 +35,10 @@ RUN mkdir -p /app/public
 # Disable Next.js telemetry during build
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
+ENV NODE_OPTIONS="--max-old-space-size=4096"
+# Set a dummy DATABASE_URL so the build uses PgStore (pure JS) instead of
+# better-sqlite3 (native binary), which causes SIGSEGV on Alpine at build time.
+ENV DATABASE_URL="postgresql://build:build@localhost:5432/build"
 
 RUN npm run build
 
@@ -60,7 +64,7 @@ COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/scripts ./scripts
 COPY --from=builder /app/prompts ./prompts
-COPY --from=builder /app/data ./data
+# Note: /app/data is already created by mkdir -p above; excluded from build context via .dockerignore
 
 # Expose Next.js port
 EXPOSE 3000
