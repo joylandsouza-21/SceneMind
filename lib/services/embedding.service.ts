@@ -122,8 +122,23 @@ export class EmbeddingService {
     if (this.genAI) {
       try {
         const model = this.genAI.getGenerativeModel({ model: this.modelName });
-        const result = await model.embedContent(text);
-        const vector = result.embedding.values;
+        let vector: number[];
+        try {
+          const result = await model.embedContent({
+            content: { role: 'user', parts: [{ text }] },
+            outputDimensionality: 768,
+          } as any);
+          vector = result.embedding.values;
+        } catch {
+          const result = await model.embedContent(text);
+          vector = result.embedding.values;
+        }
+
+        // Enforce exactly 768 dimensions for pgvector and cosine similarity consistency
+        if (vector.length > 768) {
+          vector = this.normalizeVector(vector.slice(0, 768));
+        }
+
         const latencyMs = Date.now() - start;
         const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate);
 
@@ -248,6 +263,18 @@ export class EmbeddingService {
     }
 
     return Array.from(vec);
+  }
+
+  public normalizeVector(vec: number[]): number[] {
+    let norm = 0;
+    for (let i = 0; i < vec.length; i++) {
+      norm += vec[i] * vec[i];
+    }
+    norm = Math.sqrt(norm);
+    if (norm > 0) {
+      return vec.map((v) => v / norm);
+    }
+    return vec;
   }
 
   public cosineSimilarity(a: number[], b: number[]): number {
