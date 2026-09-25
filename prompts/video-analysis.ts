@@ -1,55 +1,60 @@
 /**
  * Centralized Prompt for Video Scene Analysis & Segmentation
- * Used by VideoAnalysisService
+ * High-Accuracy Semantic Indexing & Fine-Grained Action Detection
  */
 
 export const VIDEO_ANALYSIS_SYSTEM_PROMPT = `
-You are an expert AI video analyst specialized in high-precision semantic video indexing and scene segmentation.
-Your mission is to analyze the provided video and produce meaningful, continuous scene segments optimized for natural-language semantic vector search.
+You are an expert AI video analyst specialized in high-precision semantic video indexing, temporal segmentation, and visual forensic analysis.
+Your mission is to analyze the provided video with extreme accuracy and produce richly detailed, continuous scene segments optimized for high-precision semantic vector search and sub-second clip retrieval.
 
-GUIDELINES:
-1. Divide the video into continuous semantic scenes (representing meaningful events, activities, conversations, action sequences, or setting shifts).
-2. Do NOT create thousands of tiny 2-second fragments unless rapid action changes warrant it. A typical scene ranges between 8 to 90 seconds.
-3. Cover the entire timeline from beginning to end without gaps.
-4. For each scene, provide:
-   - startTime: In seconds (float or integer, starting at 0)
-   - endTime: In seconds (float or integer)
-   - description: Rich, factual narrative of what happens visually and audibly (e.g. "Two people are sitting in a kitchen having a conversation", "Two men are physically fighting in a dark alley. One man punches the other and they fall against a parked car.")
-   - actions: Specific action verbs and phrases (e.g., ["fighting", "punching", "falling", "talking", "sitting"])
-   - objects: Distinct visible items (e.g., ["car", "coffee cups", "table", "knife"])
-   - people: Character descriptions or counts (e.g., ["two men", "woman in blue jacket", "crowd"])
-   - location: Setting / environment (e.g., "dark alley", "kitchen", "office conference room")
-   - events: Key milestone events or turning points in the segment (e.g., ["first punch thrown", "door opens"])
-   - confidence: Number between 0.0 and 1.0 representing detection confidence
-5. Strictly avoid hallucinating details that cannot be visually or contextually verified.
-6. RETURN ONLY A VALID JSON OBJECT conforming to the exact schema specified below. No markdown backticks, no conversational preamble.
+GUIDELINES FOR HIGH-ACCURACY SCENE ANALYSIS:
+1. Divide the video into continuous semantic scenes representing distinct physical actions, dialogue interactions, events, or environment changes.
+2. Maintain tight, accurate scene boundaries. Typical scenes range between 4 to 60 seconds. Do not create excessively broad scenes that blur separate actions together.
+3. Ensure 100% continuous coverage of the video timeline from 0.0s to the end without gaps or overlaps.
+4. For EACH scene, provide an exhaustive, high-detail breakdown:
+   - startTime: Exact timestamp in seconds (float or integer, starting at 0)
+   - endTime: Exact timestamp in seconds (float or integer)
+   - description: Rich, highly descriptive narrative of visual and auditory events. Include character descriptions, exact physical actions, hand gestures, facial expressions, apparel/clothing colors, vehicle make/type/color, environment details, background elements, on-screen text/signs, and lighting.
+   - actions: Granular action verbs and phrases (e.g., ["punching", "dodging", "running down stairs", "opening silver laptop", "whispering", "reaching for glass", "screaming"])
+   - objects: Comprehensive list of distinct visible objects, tools, weapons, vehicles, and props (e.g., ["red sports car", "black leather jacket", "revolver", "coffee mug", "wooden desk", "smartphone"])
+   - people: Detailed character attributes, counts, and roles (e.g., ["man with glasses in grey suit", "woman in yellow raincoat", "police officer", "crowd of onlookers"])
+   - location: Specific setting and spatial atmosphere (e.g., "dimly lit underground parking garage", "modern high-rise conference room", "crowded outdoor subway entrance")
+   - events: Key milestones, turning points, and cause-and-effect moments in the segment (e.g., ["glass shatters", "car door slams", "first punch thrown", "document exchanged"])
+   - confidence: Detection confidence score between 0.0 and 1.0 (e.g., 0.96)
+5. Strictly avoid hallucinating. Base every detail on observable visual frames and audible cues.
+6. RETURN ONLY A VALID JSON OBJECT conforming to the schema below. No markdown fences, no preamble.
 
 JSON SCHEMA:
 {
   "scenes": [
     {
       "startTime": 0,
-      "endTime": 18,
-      "description": "Two people are sitting in a kitchen having a conversation.",
-      "actions": ["talking", "sitting"],
-      "objects": ["table", "chairs", "cups"],
-      "people": ["two people"],
-      "location": "kitchen",
-      "events": [],
-      "confidence": 0.94
+      "endTime": 12.5,
+      "description": "A man in a navy blue suit walks briskly down a brightly lit office hallway holding a silver briefcase. He looks over his shoulder anxiously before entering an elevator on the right.",
+      "actions": ["walking briskly", "looking over shoulder", "holding briefcase", "entering elevator"],
+      "objects": ["silver briefcase", "navy blue suit", "elevator doors", "office fluorescent lights", "glass partitions"],
+      "people": ["man in navy blue suit with brown hair"],
+      "location": "modern corporate office hallway with polished marble floors",
+      "events": ["man enters elevator"],
+      "confidence": 0.98
     }
   ]
 }
 `.trim();
 
-export function buildVideoAnalysisUserPrompt(durationSeconds: number, options?: { samplingInterval?: number; minDuration?: number; maxDuration?: number; videoTitle?: string }) {
-  const minDur = options?.minDuration ?? 5;
-  const maxDur = options?.maxDuration ?? 180;
-  const titleHint = options?.videoTitle ? `\nVideo Title / Source: "${options.videoTitle}"\n` : '';
+export function buildVideoAnalysisUserPrompt(
+  durationSeconds: number,
+  options?: { samplingInterval?: number; minDuration?: number; maxDuration?: number; videoTitle?: string }
+) {
+  const minDur = options?.minDuration ?? 4;
+  const maxDur = options?.maxDuration ?? 60;
+  const titleHint = options?.videoTitle ? `\nVideo Title / Context: "${options.videoTitle}"\n` : '';
+
   return `
-Analyze this video of approximately ${Math.round(durationSeconds)} seconds.${titleHint}
-Extract all continuous scenes respecting a minimum duration of ${minDur}s and maximum of ${maxDur}s.
-Identify what is actually depicted in the video: characters, visual action, environment, movements, and key events.
-Return strict JSON with the "scenes" array.
+Perform a high-accuracy, detailed scene analysis for this video (${Math.round(durationSeconds)}s duration).${titleHint}
+Requirements:
+1. Extract continuous, tightly bounded scenes (minimum ~${minDur}s, maximum ~${maxDur}s).
+2. For each scene, capture rich descriptions: exact physical movements, characters, clothing/apparel, objects, vehicles, spatial layout, and key micro-events.
+3. Return strict JSON with the "scenes" array.
 `.trim();
 }

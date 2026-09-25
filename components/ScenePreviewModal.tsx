@@ -9,6 +9,8 @@ import {
   RotateCcw,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   Scissors,
   ExternalLink,
   Film,
@@ -30,6 +32,86 @@ interface ScenePreviewModalProps {
   currentIndex: number;
   onNavigateIndex: (newIndex: number) => void;
   onOpenClipModal: (scene: any) => void;
+}
+
+const PREVIEW_SEGMENT_COLORS = [
+  { bg: 'bg-blue-500/15', text: 'text-blue-300', border: 'border-blue-500/30' },
+  { bg: 'bg-emerald-500/15', text: 'text-emerald-300', border: 'border-emerald-500/30' },
+  { bg: 'bg-amber-500/15', text: 'text-amber-300', border: 'border-amber-500/30' },
+  { bg: 'bg-purple-500/15', text: 'text-purple-300', border: 'border-purple-500/30' },
+  { bg: 'bg-cyan-500/15', text: 'text-cyan-300', border: 'border-cyan-500/30' },
+  { bg: 'bg-rose-500/15', text: 'text-rose-300', border: 'border-rose-500/30' },
+];
+
+function getPreviewSegmentColor(index: number) {
+  return PREVIEW_SEGMENT_COLORS[Math.max(0, (index - 1) % PREVIEW_SEGMENT_COLORS.length)] || PREVIEW_SEGMENT_COLORS[0];
+}
+
+function MatchedSegmentsPreviewAccordion({ segmentMatches }: { segmentMatches: any[] }) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  if (!segmentMatches || segmentMatches.length === 0) return null;
+
+  const topMatch = segmentMatches[0];
+  const topColor = getPreviewSegmentColor(topMatch.segmentIndex || 1);
+
+  return (
+    <div className="rounded-2xl bg-slate-900/70 border border-slate-800/80 overflow-hidden transition-all">
+      {/* 1-Line Collapsed Summary Bar (Default closed) */}
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full px-3 py-2 flex items-center justify-between gap-2 text-left hover:bg-slate-800/50 transition-colors"
+      >
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <Tag className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+          <span className="text-[11px] font-medium text-slate-300 truncate">
+            Matched Prompt Portions ({segmentMatches.length}):
+          </span>
+          <span
+            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ${topColor.bg} ${topColor.text}`}
+          >
+            <span>{topMatch.segmentLabel}</span>
+            <span className="opacity-75 font-mono">({Math.round(topMatch.similarity * 100)}%)</span>
+          </span>
+        </div>
+
+        <div className="flex items-center gap-1 text-[11px] text-slate-400 shrink-0 font-medium">
+          <span>{isOpen ? 'Collapse' : 'Expand'}</span>
+          {isOpen ? <ChevronUp className="w-3.5 h-3.5 text-slate-400" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400" />}
+        </div>
+      </button>
+
+      {/* Expandable Scrollable Content Area */}
+      {isOpen && (
+        <div className="p-3 pt-2 border-t border-slate-800/60 bg-slate-950/50 animate-in fade-in duration-150 space-y-2">
+          <div className="max-h-48 overflow-y-auto pr-1 space-y-1.5 scrollbar-thin scrollbar-thumb-slate-700">
+            {segmentMatches.map((sm: any) => {
+              const color = getPreviewSegmentColor(sm.segmentIndex || 1);
+              return (
+                <div
+                  key={sm.segmentId}
+                  className="text-xs text-slate-300 bg-slate-900/80 border border-slate-800/80 p-2.5 rounded-xl space-y-1"
+                >
+                  <div className="flex items-center justify-between text-[11px] font-semibold">
+                    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] ${color.bg} ${color.text}`}>
+                      {sm.segmentLabel}
+                    </span>
+                    <span className="font-mono text-emerald-400 text-[10px]">
+                      {Math.round(sm.similarity * 100)}% match
+                    </span>
+                  </div>
+                  <p className="text-slate-300 text-[11px] leading-relaxed italic">
+                    "{sm.segmentText}"
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function ScenePreviewModal({
@@ -408,7 +490,7 @@ export default function ScenePreviewModal({
           </div>
 
           {/* Right: Scene Metadata & Storyboard Info (5 cols) */}
-          <div className="lg:col-span-5 p-5 flex flex-col justify-between space-y-4">
+          <div className="lg:col-span-5 p-5 flex flex-col justify-between space-y-4 overflow-y-auto max-h-[85vh] lg:max-h-[600px] scrollbar-thin">
             <div className="space-y-4">
               {/* Match Score & Status */}
               <div className="flex items-center justify-between gap-2">
@@ -429,33 +511,8 @@ export default function ScenePreviewModal({
                 </span>
               </div>
 
-              {/* Matched Prompt Segments */}
-              {scene.segmentMatches && scene.segmentMatches.length > 0 && (
-                <div className="p-3 rounded-2xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
-                  <div className="flex items-center gap-1.5 text-[11px] text-slate-400 font-medium">
-                    <Tag className="w-3.5 h-3.5 text-indigo-400" />
-                    <span>Matched Prompt Portions:</span>
-                  </div>
-                  <div className="space-y-1">
-                    {scene.segmentMatches.map((sm: any) => (
-                      <div
-                        key={sm.segmentId}
-                        className="text-xs text-slate-300 bg-slate-950/60 border border-slate-800/60 p-2 rounded-xl"
-                      >
-                        <div className="flex items-center justify-between text-[10px] font-semibold text-indigo-400 mb-0.5">
-                          <span>{sm.segmentLabel}</span>
-                          <span className="font-mono text-emerald-400">
-                            {Math.round(sm.similarity * 100)}% match
-                          </span>
-                        </div>
-                        <p className="line-clamp-2 text-slate-300 italic">
-                          "{sm.segmentText}"
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+              {/* Matched Prompt Segments (Collapsible with internal scrolling) */}
+              <MatchedSegmentsPreviewAccordion segmentMatches={scene.segmentMatches || []} />
 
               {/* Description */}
               <div className="space-y-1.5">

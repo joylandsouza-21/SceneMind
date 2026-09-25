@@ -16,11 +16,11 @@ export async function POST(req: NextRequest) {
 
     const trimmedQuery = query.trim();
 
-    // Google Gemini text-embedding-004 limit is 2,048 tokens (~8,192 chars)
+    // Allow long multi-scene recap prompts up to 8,192 tokens (~32,768 chars)
     const estimatedTokens = Math.ceil(trimmedQuery.length / 4);
-    if (estimatedTokens > 2048) {
+    if (estimatedTokens > 8192) {
       return NextResponse.json({
-        error: `Search prompt exceeds Google Gemini embedding limit of 2,048 tokens (your query is ~${estimatedTokens} tokens / ${trimmedQuery.length} characters). Please shorten your search prompt.`
+        error: `Search prompt exceeds maximum script limit of 8,192 tokens (~${estimatedTokens} tokens / ${trimmedQuery.length} characters). Please shorten your prompt.`
       }, { status: 400 });
     }
 
@@ -89,29 +89,31 @@ export async function POST(req: NextRequest) {
     const sceneSegmentMap = new Map<string, SceneSegmentMatch[]>();
     const sceneMatchMap = new Map<string, any>();
 
-    // 1. Generate embedding for the full query
-    const { embedding: globalEmbedding } = await embeddingService.generateEmbedding(trimmedQuery);
-    const globalMatches = await vectorService.search(globalEmbedding, limit, videoIdFilter, 0.05);
+    // 1. Generate embedding for the full query (capped to 5 matches if single part)
+    const { embedding: globalEmbedding } = await embeddingService.generateEmbedding(trimmedQuery.slice(0, 2000));
+    const globalMatches = await vectorService.search(globalEmbedding, isMultiSegment ? limit : 5, videoIdFilter, 0.05);
 
     for (const m of globalMatches) {
       sceneMatchMap.set(m.sceneId, m);
     }
 
-    // 2. If multi-segment, generate embeddings for each segment and search
+    // 2. If multi-segment, generate embeddings for each segment and search (strictly 5 matches per segment)
     let segmentSummaries: (PromptSegment & { matchedClipCount: number; matchedClipIds: string[] })[] = [];
 
     if (isMultiSegment) {
       const segmentResults = await Promise.all(
         rawSegments.map(async (seg: PromptSegment) => {
           const { embedding: segEmbedding } = await embeddingService.generateEmbedding(seg.text);
-          const segMatches = await vectorService.search(segEmbedding, Math.min(limit, 10), videoIdFilter, 0.05);
+          // Exactly 5 matches per segment part
+          const segMatches = await vectorService.search(segEmbedding, 5, videoIdFilter, 0.05);
           return { segment: seg, matches: segMatches };
         })
       );
 
       segmentSummaries = segmentResults.map(({ segment, matches: segMatches }: { segment: PromptSegment; matches: any[] }) => {
+        const top5Matches = segMatches.slice(0, 5);
         const matchedClipIds: string[] = [];
-        for (const sm of segMatches) {
+        for (const sm of top5Matches) {
           matchedClipIds.push(sm.sceneId);
 
           if (!sceneMatchMap.has(sm.sceneId)) {
@@ -136,13 +138,14 @@ export async function POST(req: NextRequest) {
         };
       });
     } else {
+      const top5Global = globalMatches.slice(0, 5);
       segmentSummaries = rawSegments.map((seg: PromptSegment) => ({
         ...seg,
-        matchedClipCount: globalMatches.length,
-        matchedClipIds: globalMatches.map((m) => m.sceneId),
+        matchedClipCount: top5Global.length,
+        matchedClipIds: top5Global.map((m) => m.sceneId),
       }));
 
-      for (const gm of globalMatches) {
+      for (const gm of top5Global) {
         sceneSegmentMap.set(gm.sceneId, [
           {
             segmentId: rawSegments[0]?.id || 'seg_0',

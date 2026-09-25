@@ -26,52 +26,67 @@ export function segmentPrompt(query: string): PromptSegment[] {
   const trimmed = query.trim();
   if (!trimmed) return [];
 
-  // Check if query has multiple explicit lines
-  const rawLines = trimmed
+  // Step 1: Split into raw lines / paragraphs / list items
+  const rawBlocks = trimmed
     .split(/\r?\n+/)
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
 
-  let candidates: string[] = [];
-  if (rawLines.length >= 2) {
-    candidates = rawLines;
-  } else {
-    // Split by sentence delimiters: '.', '!', '?', or ';' followed by space or end
-    const sentences = trimmed
+  const sentences: string[] = [];
+
+  for (const block of rawBlocks) {
+    // Strip bullet points or leading numbering: "1.", "1)", "- ", "* ", "Step 1:"
+    const cleanedBlock = block.replace(/^(?:\d+[\.\)]\s*|[-*•]\s*|(?:part|scene|step)\s*\d+[:\.\s-]*)/i, '').trim();
+    if (!cleanedBlock) continue;
+
+    // Split block into individual sentences by punctuation (. ! ? ; or em-dash)
+    const blockSentences = cleanedBlock
       .split(/(?<=[.!?;\n])\s+/)
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
 
-    if (sentences.length >= 2) {
-      candidates = sentences;
+    if (blockSentences.length > 0) {
+      sentences.push(...blockSentences);
     } else {
-      candidates = [trimmed];
+      sentences.push(cleanedBlock);
     }
   }
 
-  // Strip leading list numbering and merge overly tiny fragments
-  const merged: string[] = [];
-  for (const c of candidates) {
-    const cleaned = c.replace(/^(?:\d+[\.\)]\s*|[-*•]\s*)/, '').trim();
+  // Step 2: Group sentences into ideal scene-sized chunks (1-2 sentences, ~15-35 words per part)
+  const sceneChunks: string[] = [];
+  let currentChunk = '';
+
+  for (const sentence of sentences) {
+    const cleaned = sentence.replace(/^(?:\d+[\.\)]\s*|[-*•]\s*)/, '').trim();
     if (!cleaned) continue;
 
-    if (
-      merged.length > 0 &&
-      cleaned.split(/\s+/).length <= 2 &&
-      merged[merged.length - 1].split(/\s+/).length < 20
-    ) {
-      merged[merged.length - 1] += ' ' + cleaned;
+    const sentenceWordCount = cleaned.split(/\s+/).filter(Boolean).length;
+    const currentWordCount = currentChunk ? currentChunk.split(/\s+/).filter(Boolean).length : 0;
+
+    // If current chunk is empty, start with this sentence
+    if (!currentChunk) {
+      currentChunk = cleaned;
+    } else if (currentWordCount + sentenceWordCount <= 35 && currentWordCount < 20) {
+      // Merge into 2-sentence scene beat if word count is compact (<35 words total)
+      currentChunk += ' ' + cleaned;
     } else {
-      merged.push(cleaned);
+      // Otherwise push current chunk as a discrete scene beat and start new chunk
+      sceneChunks.push(currentChunk);
+      currentChunk = cleaned;
     }
   }
 
-  if (merged.length === 0) {
-    merged.push(trimmed);
+  if (currentChunk) {
+    sceneChunks.push(currentChunk);
+  }
+
+  // Fallback if empty
+  if (sceneChunks.length === 0) {
+    sceneChunks.push(trimmed);
   }
 
   let searchCursor = 0;
-  return merged.map((text, idx) => {
+  return sceneChunks.map((text, idx) => {
     const startIndex = trimmed.indexOf(text, searchCursor);
     const endIndex = startIndex !== -1 ? startIndex + text.length : searchCursor + text.length;
     searchCursor = Math.max(searchCursor, endIndex);

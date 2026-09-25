@@ -19,7 +19,11 @@ import {
   X,
   Tag,
   RefreshCw,
-  History
+  History,
+  ChevronLeft,
+  ChevronRight,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import { formatTime } from '@/components/VideoPlayer';
 import ClipModal from '@/components/ClipModal';
@@ -28,8 +32,8 @@ import VideoSelectDropdown from '@/components/VideoSelectDropdown';
 import SearchHistoryModal, { SearchHistoryItem } from '@/components/SearchHistoryModal';
 import ScenePreviewModal from '@/components/ScenePreviewModal';
 
-const MAX_PROMPT_TOKENS = 2048;
-const MAX_PROMPT_CHARS = 8192;
+const MAX_PROMPT_TOKENS = 8192;
+const MAX_PROMPT_CHARS = 32768;
 
 interface SegmentMatch {
   segmentId: string;
@@ -111,6 +115,98 @@ function getSegmentColor(index: number) {
   return SEGMENT_COLORS[(index - 1) % SEGMENT_COLORS.length] || SEGMENT_COLORS[0];
 }
 
+function MatchedSegmentsAccordion({
+  segmentMatches,
+  selectedSegmentId,
+  onSelectSegment,
+}: {
+  segmentMatches: SegmentMatch[];
+  selectedSegmentId: string | 'all';
+  onSelectSegment: (id: string) => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  if (!segmentMatches || segmentMatches.length === 0) return null;
+
+  const topMatch = segmentMatches[0];
+  const topColor = getSegmentColor(topMatch.segmentIndex);
+
+  return (
+    <div className="rounded-xl bg-slate-950/70 border border-slate-800/80 overflow-hidden transition-all">
+      {/* 1-Line Collapsed Summary Bar (Default closed) */}
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full px-3 py-2 flex items-center justify-between gap-2 text-left hover:bg-slate-900/60 transition-colors"
+      >
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <Tag className="w-3 h-3 text-indigo-400 shrink-0" />
+          <span className="text-[11px] font-medium text-slate-300 truncate">
+            Matched Prompt Segments ({segmentMatches.length}):
+          </span>
+          <span
+            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ${topColor.bg} ${topColor.text}`}
+          >
+            <span>{topMatch.segmentLabel}</span>
+            <span className="opacity-75 font-mono">({Math.round(topMatch.similarity * 100)}%)</span>
+          </span>
+        </div>
+
+        <div className="flex items-center gap-1 text-[10px] text-slate-400 shrink-0 font-medium">
+          <span>{isOpen ? 'Collapse' : 'Expand'}</span>
+          {isOpen ? <ChevronUp className="w-3.5 h-3.5 text-slate-400" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400" />}
+        </div>
+      </button>
+
+      {/* Expandable Breakdown Area */}
+      {isOpen && (
+        <div className="p-3 pt-2 border-t border-slate-800/60 space-y-2 bg-slate-950/40 animate-in fade-in duration-150">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {segmentMatches.map((sm) => {
+              const isSelected = selectedSegmentId === sm.segmentId;
+              const colorCls = getSegmentColor(sm.segmentIndex);
+              return (
+                <button
+                  key={sm.segmentId}
+                  type="button"
+                  onClick={() => onSelectSegment(isSelected ? 'all' : sm.segmentId)}
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold transition-all ${
+                    isSelected
+                      ? `${colorCls.activeBg} ${colorCls.text} ring-1 ${colorCls.ring} shadow-sm`
+                      : `${colorCls.bg} ${colorCls.text} hover:opacity-80`
+                  }`}
+                  title={`Click to isolate ${sm.segmentLabel}: "${sm.segmentText}"`}
+                >
+                  <span>{sm.segmentLabel}</span>
+                  <span className="opacity-75 font-mono">({Math.round(sm.similarity * 100)}%)</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="space-y-1.5 pt-1">
+            {segmentMatches.map((sm) => {
+              const colorCls = getSegmentColor(sm.segmentIndex);
+              return (
+                <div
+                  key={sm.segmentId}
+                  className="text-[11px] text-slate-400 leading-relaxed pl-2 border-l-2 border-slate-800 flex items-start gap-1.5"
+                >
+                  <span className={`font-semibold shrink-0 ${colorCls.text}`}>
+                    {sm.segmentLabel}:
+                  </span>
+                  <span className="line-clamp-2 text-slate-300">
+                    "{sm.segmentText}"
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function GlobalSearchContent() {
   const searchParams = useSearchParams();
   const [query, setQuery] = useState('');
@@ -122,6 +218,7 @@ function GlobalSearchContent() {
   const [results, setResults] = useState<any[]>([]);
   const [segments, setSegments] = useState<PromptSegmentItem[]>([]);
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | 'all'>('all');
+  const [segmentPage, setSegmentPage] = useState(0);
   const [hasSearched, setHasSearched] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
 
@@ -214,7 +311,7 @@ function GlobalSearchContent() {
     const tokens = Math.ceil(q.length / 4);
     if (tokens > MAX_PROMPT_TOKENS || q.length > MAX_PROMPT_CHARS) {
       setSearchError(
-        `Prompt exceeds Google Gemini embedding limit of 2,048 tokens (~${tokens} tokens / ${q.length} chars). Please shorten your search query.`
+        `Prompt exceeds maximum script limit of ${MAX_PROMPT_TOKENS} tokens (~${tokens} tokens / ${q.length} chars). Please shorten your search script.`
       );
       return;
     }
@@ -245,6 +342,7 @@ function GlobalSearchContent() {
         setResults(data.results || []);
         setSegments(data.segments || []);
         setSelectedSegmentId('all');
+        setSegmentPage(0);
         if (data.fromCache && data.searchId) {
           setActiveHistoryId(data.searchId);
         }
@@ -326,10 +424,10 @@ function GlobalSearchContent() {
   const activeVideo = videos.find((v) => v.id === selectedVideoId);
   const activeSegment = segments.find((s) => s.id === selectedSegmentId);
 
-  // Filtered results based on selected segment
+  // Filtered results based on selected segment (capped to top 5 matches per part)
   const displayedResults = useMemo(() => {
     if (selectedSegmentId === 'all') return results;
-    return results.filter((r) => r.matchedSegmentIds?.includes(selectedSegmentId));
+    return results.filter((r) => r.matchedSegmentIds?.includes(selectedSegmentId)).slice(0, 5);
   }, [results, selectedSegmentId]);
 
   return (
@@ -612,7 +710,7 @@ function GlobalSearchContent() {
               >
                 ~{estimatedTokens.toLocaleString()}
               </span>
-              <span className="text-slate-500 font-mono">/ 2,048 tokens</span>
+              <span className="text-slate-500 font-mono">/ {MAX_PROMPT_TOKENS.toLocaleString()} tokens</span>
               <span className="text-slate-600">•</span>
               <span className="text-slate-400 font-mono">{query.length.toLocaleString()} chars</span>
             </div>
@@ -634,11 +732,11 @@ function GlobalSearchContent() {
 
           <div className="flex items-center gap-2">
             <span className="text-[11px] text-slate-500 font-medium hidden md:inline">
-              Google Gemini text-embedding-004 limit: 2,048 tokens (~8,192 chars)
+              Multi-scene script capacity: {MAX_PROMPT_TOKENS.toLocaleString()} tokens (~{MAX_PROMPT_CHARS.toLocaleString()} chars)
             </span>
             {isOverLimit && (
               <span className="text-[11px] font-semibold text-rose-400 bg-rose-500/10 border border-rose-500/30 px-2 py-0.5 rounded-md animate-pulse">
-                Over API Limit
+                Over Script Limit
               </span>
             )}
           </div>
@@ -710,83 +808,123 @@ function GlobalSearchContent() {
                 <X className="w-3.5 h-3.5" />
               </button>
             )}
+
+            {/* Pagination Controls */}
+            {segments.length > 3 && (
+              <div className="flex items-center gap-1 shrink-0 ml-auto sm:ml-0">
+                <button
+                  type="button"
+                  onClick={() => setSegmentPage(p => Math.max(0, p - 1))}
+                  disabled={segmentPage === 0}
+                  className="p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
+                  title="Previous parts"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <span className="text-[10px] font-mono text-slate-500 min-w-[32px] text-center">
+                  {segmentPage + 1}/{Math.ceil((segments.length + 1) / 4)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSegmentPage(p => Math.min(Math.ceil((segments.length + 1) / 4) - 1, p + 1))}
+                  disabled={segmentPage >= Math.ceil((segments.length + 1) / 4) - 1}
+                  className="p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
+                  title="Next parts"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Storyboard Segment Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-            {/* "All Segments" Card */}
-            <button
-              type="button"
-              onClick={() => setSelectedSegmentId('all')}
-              className={`p-3.5 rounded-2xl border text-left transition-all flex flex-col justify-between space-y-2.5 ${
-                selectedSegmentId === 'all'
-                  ? 'bg-blue-600/15 border-blue-500/50 shadow-lg shadow-blue-500/10 ring-1 ring-blue-500'
-                  : 'bg-slate-900/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-blue-400" />
-                  <span>All Segments</span>
-                </span>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-semibold">
-                  {results.length} clips
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 line-clamp-2">
-                View all retrieved scene candidates matching any part of your prompt.
-              </p>
-              <div className="text-[10px] text-blue-400 pt-1 font-medium">
-                {selectedSegmentId === 'all' ? '● Active' : 'Click to view all'}
-              </div>
-            </button>
+            {(() => {
+              const allCards = [
+                { isAll: true, seg: null },
+                ...segments.map(seg => ({ isAll: false, seg }))
+              ];
+              const displayedCards = allCards.slice(segmentPage * 4, (segmentPage + 1) * 4);
 
-            {/* Individual Segment Cards */}
-            {segments.map((seg) => {
-              const isSelected = selectedSegmentId === seg.id;
-              const color = getSegmentColor(seg.index);
-              return (
-                <button
-                  key={seg.id}
-                  type="button"
-                  onClick={() => setSelectedSegmentId(seg.id)}
-                  className={`p-3.5 rounded-2xl border text-left transition-all flex flex-col justify-between space-y-2.5 group ${
-                    isSelected
-                      ? `${color.activeBg} ${color.activeBorder} shadow-lg ring-1 ${color.ring}`
-                      : 'bg-slate-900/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className={`text-xs font-bold flex items-center gap-1.5 ${color.text}`}>
-                      <span className={`w-4 h-4 rounded-full ${color.badge} text-[10px] flex items-center justify-center font-bold`}>
-                        {seg.index}
-                      </span>
-                      <span>{seg.label}</span>
-                    </span>
-                    <span
-                      className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-semibold ${
-                        seg.matchedClipCount > 0
-                          ? `${color.bg} ${color.text} border ${color.border}`
-                          : 'bg-slate-800 text-slate-500'
+              return displayedCards.map((card) => {
+                if (card.isAll) {
+                  return (
+                    <button
+                      key="all"
+                      type="button"
+                      onClick={() => setSelectedSegmentId('all')}
+                      className={`p-3.5 rounded-2xl border text-left transition-all flex flex-col justify-between space-y-2.5 ${
+                        selectedSegmentId === 'all'
+                          ? 'bg-blue-600/15 border-blue-500/50 shadow-lg shadow-blue-500/10 ring-1 ring-blue-500'
+                          : 'bg-slate-900/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900'
                       }`}
                     >
-                      {seg.matchedClipCount} {seg.matchedClipCount === 1 ? 'clip' : 'clips'}
-                    </span>
-                  </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 text-blue-400" />
+                          <span>All Segments</span>
+                        </span>
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-semibold">
+                          {results.length} clips
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 line-clamp-2">
+                        View all retrieved scene candidates matching any part of your prompt.
+                      </p>
+                      <div className="text-[10px] text-blue-400 pt-1 font-medium">
+                        {selectedSegmentId === 'all' ? '● Active' : 'Click to view all'}
+                      </div>
+                    </button>
+                  );
+                } else {
+                  if (!card.seg) return null;
+                  const seg = card.seg;
+                  const isSelected = selectedSegmentId === seg.id;
+                  const color = getSegmentColor(seg.index);
+                  return (
+                    <button
+                      key={seg.id}
+                      type="button"
+                      onClick={() => setSelectedSegmentId(seg.id)}
+                      className={`p-3.5 rounded-2xl border text-left transition-all flex flex-col justify-between space-y-2.5 group ${
+                        isSelected
+                          ? `${color.activeBg} ${color.activeBorder} shadow-lg ring-1 ${color.ring}`
+                          : 'bg-slate-900/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className={`text-xs font-bold flex items-center gap-1.5 ${color.text}`}>
+                          <span className={`w-4 h-4 rounded-full ${color.badge} text-[10px] flex items-center justify-center font-bold`}>
+                            {seg.index}
+                          </span>
+                          <span>{seg.label}</span>
+                        </span>
+                        <span
+                          className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-semibold ${
+                            seg.matchedClipCount > 0
+                              ? `${color.bg} ${color.text} border ${color.border}`
+                              : 'bg-slate-800 text-slate-500'
+                          }`}
+                        >
+                          {seg.matchedClipCount} {seg.matchedClipCount === 1 ? 'clip' : 'clips'}
+                        </span>
+                      </div>
 
-                  <p className={`text-xs leading-relaxed line-clamp-3 ${isSelected ? 'text-white font-medium' : 'text-slate-300'}`}>
-                    "{seg.text}"
-                  </p>
+                      <p className={`text-xs leading-relaxed line-clamp-3 ${isSelected ? 'text-white font-medium' : 'text-slate-300'}`}>
+                        "{seg.text}"
+                      </p>
 
-                  <div className="flex items-center justify-between text-[10px] text-slate-500 pt-1">
-                    <span>{seg.wordCount} words</span>
-                    <span className={`font-semibold ${isSelected ? color.text : 'text-blue-400 group-hover:underline'}`}>
-                      {isSelected ? '● Active Filter' : 'Filter clips →'}
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
+                      <div className="flex items-center justify-between text-[10px] text-slate-500 pt-1">
+                        <span>{seg.wordCount} words</span>
+                        <span className={`font-semibold ${isSelected ? color.text : 'text-blue-400 group-hover:underline'}`}>
+                          {isSelected ? '● Active Filter' : 'Filter clips →'}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                }
+              });
+            })()}
           </div>
         </div>
       )}
@@ -978,36 +1116,13 @@ function GlobalSearchContent() {
                       {res.description}
                     </p>
 
-                    {/* Matched Prompt Segments Alignment Badges */}
+                    {/* Matched Prompt Segments (1-Line default, expandable) */}
                     {res.segmentMatches && res.segmentMatches.length > 0 && (
-                      <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-1.5">
-                        <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-medium">
-                          <Tag className="w-3 h-3 text-indigo-400" />
-                          <span>Matched Prompt Segments:</span>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          {res.segmentMatches.map((sm: SegmentMatch) => {
-                            const isSelected = selectedSegmentId === sm.segmentId;
-                            const colorCls = getSegmentColor(sm.segmentIndex);
-                            return (
-                              <button
-                                key={sm.segmentId}
-                                type="button"
-                                onClick={() => setSelectedSegmentId(isSelected ? 'all' : sm.segmentId)}
-                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold transition-all ${
-                                  isSelected
-                                    ? `${colorCls.activeBg} ${colorCls.text} ring-1 ${colorCls.ring} shadow-sm`
-                                    : `${colorCls.bg} ${colorCls.text} hover:opacity-80`
-                                }`}
-                                title={`Click to isolate ${sm.segmentLabel}: "${sm.segmentText}"`}
-                              >
-                                <span>{sm.segmentLabel}</span>
-                                <span className="opacity-75 font-mono">({Math.round(sm.similarity * 100)}%)</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
+                      <MatchedSegmentsAccordion
+                        segmentMatches={res.segmentMatches}
+                        selectedSegmentId={selectedSegmentId}
+                        onSelectSegment={setSelectedSegmentId}
+                      />
                     )}
 
                     {res.isVerified && res.verificationReason && (
