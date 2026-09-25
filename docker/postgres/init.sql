@@ -96,7 +96,7 @@ CREATE INDEX IF NOT EXISTS idx_clips_video ON clips(video_id);
 -- 7. Processing Jobs table
 CREATE TABLE IF NOT EXISTS jobs (
     id VARCHAR(64) PRIMARY KEY,
-    video_id VARCHAR(64) NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+    video_id VARCHAR(64) NOT NULL,
     job_type VARCHAR(64) NOT NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'pending',
     progress INT DEFAULT 0,
