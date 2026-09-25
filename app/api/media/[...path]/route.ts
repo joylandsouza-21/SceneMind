@@ -2,46 +2,78 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import { storageService } from '@/lib/services/storage.service';
 
-function createSafeFileStream(fullPath: string, options?: { start?: number; end?: number }): ReadableStream<Uint8Array> {
-  let fileStream: fs.ReadStream | null = null;
+/**
+ * Converts a Node.js fs.ReadStream to a Web ReadableStream that safely handles
+ * client disconnects, backpressure, and prevents ERR_INVALID_STATE uncaught exceptions.
+ */
+function nodeStreamToSafeWebStream(
+  stream: fs.ReadStream,
+  signal?: AbortSignal
+): ReadableStream<Uint8Array> {
   let isClosed = false;
+
+  const safeClose = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+    if (isClosed) return;
+    isClosed = true;
+    try {
+      controller.close();
+    } catch {}
+    try {
+      stream.destroy();
+    } catch {}
+  };
 
   return new ReadableStream<Uint8Array>({
     start(controller) {
-      fileStream = fs.createReadStream(fullPath, options);
+      if (signal?.aborted) {
+        safeClose(controller);
+        return;
+      }
 
-      fileStream.on('data', (chunk: Buffer | string) => {
-        if (isClosed) return;
+      signal?.addEventListener(
+        'abort',
+        () => {
+          safeClose(controller);
+        },
+        { once: true }
+      );
+
+      stream.on('data', (chunk: Buffer | string) => {
+        if (isClosed || signal?.aborted) {
+          try {
+            stream.destroy();
+          } catch {}
+          return;
+        }
         try {
-          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-          controller.enqueue(new Uint8Array(buffer));
+          const u8 = Buffer.isBuffer(chunk) ? new Uint8Array(chunk) : new Uint8Array(Buffer.from(chunk));
+          controller.enqueue(u8);
         } catch {
+          // If controller is already closed by client disconnect, suppress and cleanup
           isClosed = true;
-          fileStream?.destroy();
+          try {
+            stream.destroy();
+          } catch {}
         }
       });
 
-      fileStream.on('end', () => {
-        if (isClosed) return;
-        isClosed = true;
-        try {
-          controller.close();
-        } catch {}
+      stream.on('end', () => {
+        safeClose(controller);
       });
 
-      fileStream.on('error', () => {
-        if (isClosed) return;
-        isClosed = true;
-        try {
-          controller.close();
-        } catch {}
+      stream.on('error', () => {
+        safeClose(controller);
+      });
+
+      stream.on('close', () => {
+        safeClose(controller);
       });
     },
     cancel() {
       isClosed = true;
-      if (fileStream) {
-        fileStream.destroy();
-      }
+      try {
+        stream.destroy();
+      } catch {}
     },
   });
 }
@@ -86,13 +118,13 @@ export async function GET(
         });
       }
 
-      // Stream to the end of the file so HTML5 video buffers continuously without pausing
       const end = parts[1] && !isNaN(parseInt(parts[1], 10))
         ? Math.min(parseInt(parts[1], 10), fileSize - 1)
         : fileSize - 1;
 
       const chunkSize = end - start + 1;
-      const webStream = createSafeFileStream(fullPath, { start, end });
+      const fileStream = fs.createReadStream(fullPath, { start, end });
+      const webStream = nodeStreamToSafeWebStream(fileStream, req.signal);
 
       return new Response(webStream, {
         status: 206,
@@ -101,12 +133,14 @@ export async function GET(
           'Accept-Ranges': 'bytes',
           'Content-Length': chunkSize.toString(),
           'Content-Type': contentType,
+          'Cache-Control': 'public, max-age=3600',
         },
       });
     }
 
     // Full stream response
-    const webStream = createSafeFileStream(fullPath);
+    const fileStream = fs.createReadStream(fullPath);
+    const webStream = nodeStreamToSafeWebStream(fileStream, req.signal);
 
     return new Response(webStream, {
       status: 200,
@@ -114,6 +148,7 @@ export async function GET(
         'Content-Length': fileSize.toString(),
         'Content-Type': contentType,
         'Accept-Ranges': 'bytes',
+        'Cache-Control': 'public, max-age=3600',
       },
     });
   } catch (err: any) {

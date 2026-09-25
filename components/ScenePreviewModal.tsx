@@ -154,22 +154,59 @@ export default function ScenePreviewModal({
     }
   }, [isOpen]);
 
-  // Jump video to sceneStart when scene changes or modal opens
-  useEffect(() => {
-    if (isOpen && scene && videoRef.current) {
-      setIsVideoLoading(true);
-      setIsPlaying(false);
-      videoRef.current.currentTime = sceneStart;
-      setCurrentTime(sceneStart);
-      const p = videoRef.current.play();
-      if (p !== undefined) {
-        p.catch(() => {
-          setIsPlaying(false);
+  // Jump video to sceneStart when scene changes or modal opens with readiness check
+  const seekAndPlayScene = useCallback((targetStart: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    setIsVideoLoading(true);
+    setIsPlaying(false);
+
+    const performSeek = () => {
+      try {
+        video.currentTime = targetStart;
+        setCurrentTime(targetStart);
+
+        const playPromise = video.play();
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => {
+              setIsPlaying(true);
+              setIsVideoLoading(false);
+            })
+            .catch(() => {
+              setIsPlaying(false);
+              setIsVideoLoading(false);
+            });
+        } else {
           setIsVideoLoading(false);
-        });
+        }
+      } catch {
+        setIsVideoLoading(false);
       }
+    };
+
+    if (video.readyState >= 1) {
+      performSeek();
+    } else {
+      video.addEventListener('loadedmetadata', performSeek, { once: true });
     }
-  }, [isOpen, currentIndex, sceneStart]);
+  }, []);
+
+  useEffect(() => {
+    if (isOpen && scene) {
+      seekAndPlayScene(sceneStart);
+    }
+  }, [isOpen, currentIndex, sceneStart, seekAndPlayScene]);
+
+  // Safety fallback: Never let loading spinner get stuck indefinitely
+  useEffect(() => {
+    if (!isVideoLoading) return;
+    const timer = setTimeout(() => {
+      setIsVideoLoading(false);
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [isVideoLoading]);
 
   const handleTimeUpdate = () => {
     const video = videoRef.current;
@@ -178,12 +215,13 @@ export default function ScenePreviewModal({
     const t = video.currentTime;
     setCurrentTime(t);
 
-    // If the video is actively advancing and unpaused, dismiss the loader
-    if (!video.paused) {
+    // If the video is actively advancing, dismiss the loader
+    if (!video.paused && video.readyState >= 2) {
       setIsPlaying(true);
       setIsVideoLoading(false);
     }
 
+    // Loop or pause when reaching scene boundaries
     if (t >= sceneEnd) {
       if (isLooping) {
         video.currentTime = sceneStart;
@@ -192,9 +230,6 @@ export default function ScenePreviewModal({
         video.pause();
         setIsPlaying(false);
       }
-    } else if (t < sceneStart - 1) {
-      // If outside the scene, snap back
-      video.currentTime = sceneStart;
     }
   };
 
