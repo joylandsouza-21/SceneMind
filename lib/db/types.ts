@@ -132,6 +132,24 @@ export interface VectorRecord {
   createdAt: string;
 }
 
+export type ModelProvider = 'gemini' | 'openai' | 'anthropic' | 'voyage' | 'cohere' | 'mistral' | 'groq' | 'ollama' | 'custom';
+
+export type TaskType = 'video_processing' | 'embedding' | 'semantic_search' | 'timestamp_verification';
+
+export interface AiModelConfig {
+  id: string; // e.g. 'video_processing' | 'embedding' | 'semantic_search' | 'timestamp_verification'
+  taskType: TaskType;
+  provider: ModelProvider;
+  modelName: string;
+  apiKey?: string;
+  baseUrl?: string;
+  dimensions?: number;
+  temperature?: number;
+  maxTokens?: number;
+  isActive: boolean;
+  updatedAt: string;
+}
+
 export interface DatabaseSchema {
   videos: Video[];
   groups: VideoGroup[];
@@ -141,4 +159,5 @@ export interface DatabaseSchema {
   jobs: ProcessingJob[];
   costs: AiCost[];
   vectors: VectorRecord[];
+  configs: AiModelConfig[];
 }

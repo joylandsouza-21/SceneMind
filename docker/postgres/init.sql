@@ -138,5 +138,18 @@ CREATE TABLE IF NOT EXISTS vectors (
 CREATE INDEX IF NOT EXISTS idx_vectors_video ON vectors(video_id);
 CREATE INDEX IF NOT EXISTS idx_vectors_scene ON vectors(scene_id);
 
--- HNSW index for fast cosine similarity search on embeddings
--- CREATE INDEX IF NOT EXISTS idx_vectors_embedding ON vectors USING hnsw (embedding vector_cosine_ops);
+-- 10. AI Model & API Configuration Table
+CREATE TABLE IF NOT EXISTS ai_configs (
+    id VARCHAR(64) PRIMARY KEY,
+    task_type VARCHAR(64) NOT NULL,
+    provider VARCHAR(64) NOT NULL,
+    model_name VARCHAR(128) NOT NULL,
+    api_key TEXT,
+    base_url TEXT,
+    dimensions INT DEFAULT 768,
+    temperature DOUBLE PRECISION DEFAULT 0.2,
+    max_tokens INT,
+    is_active BOOLEAN DEFAULT TRUE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_ai_configs_task ON ai_configs(task_type);

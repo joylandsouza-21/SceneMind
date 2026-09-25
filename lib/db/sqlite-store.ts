@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
-import { Video, VideoGroup, VideoScene, VideoSearch, VideoClip, ProcessingJob, AiCost, VectorRecord } from './types';
+import { Video, VideoGroup, VideoScene, VideoSearch, VideoClip, ProcessingJob, AiCost, VectorRecord, AiModelConfig } from './types';
 import { IStore } from './store.interface';
 
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(process.cwd(), 'data'));
@@ -118,8 +118,7 @@ export class SqliteStore implements IStore {
         retry_count INTEGER DEFAULT 0,
         error TEXT,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+        updated_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS costs (
@@ -146,6 +145,21 @@ export class SqliteStore implements IStore {
       );
       CREATE INDEX IF NOT EXISTS idx_vectors_video ON vectors(video_id);
       CREATE INDEX IF NOT EXISTS idx_vectors_scene ON vectors(scene_id);
+
+      CREATE TABLE IF NOT EXISTS ai_configs (
+        id TEXT PRIMARY KEY,
+        task_type TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model_name TEXT NOT NULL,
+        api_key TEXT,
+        base_url TEXT,
+        dimensions INTEGER DEFAULT 768,
+        temperature REAL DEFAULT 0.2,
+        max_tokens INTEGER,
+        is_active INTEGER DEFAULT 1,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_ai_configs_task ON ai_configs(task_type);
     `);
   }
 
@@ -478,6 +492,54 @@ export class SqliteStore implements IStore {
     this.db.prepare('DELETE FROM vectors WHERE id = ?').run(id);
   }
 
+  // --- AI Model & API Configs ---
+  public getAiConfigs(): AiModelConfig[] {
+    return this.db.prepare('SELECT * FROM ai_configs ORDER BY updated_at DESC').all().map(this.mapConfig);
+  }
+
+  public getAiConfig(id: string): AiModelConfig | undefined {
+    const row = this.db.prepare('SELECT * FROM ai_configs WHERE id = ? OR task_type = ?').get(id, id);
+    return row ? this.mapConfig(row) : undefined;
+  }
+
+  public upsertAiConfig(config: AiModelConfig): AiModelConfig {
+    const now = new Date().toISOString();
+    const configWithTime = { ...config, updatedAt: now };
+    this.db.prepare(`
+      INSERT INTO ai_configs (id, task_type, provider, model_name, api_key, base_url, dimensions, temperature, max_tokens, is_active, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        task_type = excluded.task_type,
+        provider = excluded.provider,
+        model_name = excluded.model_name,
+        api_key = excluded.api_key,
+        base_url = excluded.base_url,
+        dimensions = excluded.dimensions,
+        temperature = excluded.temperature,
+        max_tokens = excluded.max_tokens,
+        is_active = excluded.is_active,
+        updated_at = excluded.updated_at
+    `).run(
+      config.id,
+      config.taskType,
+      config.provider,
+      config.modelName,
+      config.apiKey || null,
+      config.baseUrl || null,
+      config.dimensions || 768,
+      config.temperature ?? 0.2,
+      config.maxTokens || null,
+      config.isActive ? 1 : 0,
+      now
+    );
+    return configWithTime;
+  }
+
+  public deleteAiConfig(id: string): boolean {
+    const res = this.db.prepare('DELETE FROM ai_configs WHERE id = ?').run(id);
+    return res.changes > 0;
+  }
+
   // --- Row Mappers (SQLite snake_case → TypeScript camelCase) ---
   private mapGroup(row: any): VideoGroup {
     return {
@@ -604,6 +666,22 @@ export class SqliteStore implements IStore {
       text: row.text,
       metadata: JSON.parse(row.metadata || '{}'),
       createdAt: row.created_at,
+    };
+  }
+
+  private mapConfig(row: any): AiModelConfig {
+    return {
+      id: row.id,
+      taskType: row.task_type,
+      provider: row.provider,
+      modelName: row.model_name,
+      apiKey: row.api_key || undefined,
+      baseUrl: row.base_url || undefined,
+      dimensions: row.dimensions || 768,
+      temperature: row.temperature != null ? parseFloat(row.temperature) : 0.2,
+      maxTokens: row.max_tokens ? parseInt(row.max_tokens, 10) : undefined,
+      isActive: row.is_active === 1 || row.is_active === true,
+      updatedAt: row.updated_at,
     };
   }
 }

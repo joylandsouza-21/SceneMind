@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { DatabaseSchema, Video, VideoGroup, VideoScene, VideoSearch, VideoClip, ProcessingJob, AiCost, VectorRecord } from './types';
+import { DatabaseSchema, Video, VideoGroup, VideoScene, VideoSearch, VideoClip, ProcessingJob, AiCost, VectorRecord, AiModelConfig } from './types';
 import { IStore } from './store.interface';
 
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(process.cwd(), 'data'));
@@ -15,6 +15,7 @@ const defaultData: DatabaseSchema = {
   jobs: [],
   costs: [],
   vectors: [],
+  configs: [],
 };
 
 export class JsonStore implements IStore {
@@ -75,6 +76,7 @@ export class JsonStore implements IStore {
           jobs: parsed.jobs || [],
           costs: parsed.costs || [],
           vectors: parsed.vectors || [],
+          configs: parsed.configs || [],
         };
       }
     } catch (err) {
@@ -429,5 +431,40 @@ export class JsonStore implements IStore {
     this.reloadIfChanged();
     this.data.vectors = this.data.vectors.filter((v) => v.id !== id);
     this.save();
+  }
+
+  // --- AI Configs CRUD ---
+  public getAiConfigs(): AiModelConfig[] {
+    this.reloadIfChanged();
+    return [...(this.data.configs || [])];
+  }
+
+  public getAiConfig(id: string): AiModelConfig | undefined {
+    this.reloadIfChanged();
+    return (this.data.configs || []).find((c) => c.id === id || c.taskType === id);
+  }
+
+  public upsertAiConfig(config: AiModelConfig): AiModelConfig {
+    this.reloadIfChanged();
+    if (!this.data.configs) this.data.configs = [];
+    const now = new Date().toISOString();
+    const configWithTime = { ...config, updatedAt: now };
+    const idx = this.data.configs.findIndex((c) => c.id === config.id);
+    if (idx >= 0) {
+      this.data.configs[idx] = configWithTime;
+    } else {
+      this.data.configs.push(configWithTime);
+    }
+    this.save();
+    return configWithTime;
+  }
+
+  public deleteAiConfig(id: string): boolean {
+    this.reloadIfChanged();
+    if (!this.data.configs) return false;
+    const initialLen = this.data.configs.length;
+    this.data.configs = this.data.configs.filter((c) => c.id !== id);
+    this.save();
+    return this.data.configs.length < initialLen;
   }
 }

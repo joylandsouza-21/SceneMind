@@ -9,7 +9,8 @@ import {
   Search,
   LayoutDashboard,
   Activity,
-  BarChart3
+  BarChart3,
+  Sliders
 } from 'lucide-react';
 
 export default function Navbar() {
@@ -66,6 +67,7 @@ export default function Navbar() {
     { href: '/videos', label: 'Videos & Upload', icon: Film },
     { href: '/search', label: 'Global Search', icon: Search },
     { href: '/analytics', label: 'Cost Analytics', icon: BarChart3 },
+    { href: '/config', label: 'AI Config', icon: Sliders },
   ];
 
   return (

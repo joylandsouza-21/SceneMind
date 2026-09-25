@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { pricingService } from './pricing.service';
+import { aiConfigService, normalizeAnthropicModel } from './ai-config.service';
 
 export interface SceneMetadataForEmbedding {
   description: string;
@@ -89,17 +90,6 @@ export function segmentPrompt(query: string): PromptSegment[] {
 }
 
 export class EmbeddingService {
-  private genAI: GoogleGenerativeAI | null = null;
-  private modelName: string;
-
-  constructor() {
-    const apiKey = process.env.GEMINI_API_KEY;
-    this.modelName = process.env.GEMINI_EMBEDDING_MODEL || 'text-embedding-004';
-    if (apiKey && apiKey.trim() !== '') {
-      this.genAI = new GoogleGenerativeAI(apiKey);
-    }
-  }
-
   public buildCanonicalText(meta: SceneMetadataForEmbedding): string {
     const lines = [
       `Scene:\n${meta.description.trim()}`,
@@ -118,10 +108,13 @@ export class EmbeddingService {
   ): Promise<{ embedding: number[]; dimensions: number; cost: number; latencyMs: number }> {
     const start = Date.now();
     const tokenCountEstimate = Math.ceil(text.length / 4);
+    const config = aiConfigService.getEffectiveConfig('embedding');
 
-    if (this.genAI) {
+    // 1. Google Gemini Embeddings
+    if (config.provider === 'gemini' && config.apiKey) {
       try {
-        const model = this.genAI.getGenerativeModel({ model: this.modelName });
+        const genAI = new GoogleGenerativeAI(config.apiKey);
+        const model = genAI.getGenerativeModel({ model: config.modelName || 'gemini-embedding-001' });
         let vector: number[];
         try {
           const result = await model.embedContent({
@@ -134,7 +127,6 @@ export class EmbeddingService {
           vector = result.embedding.values;
         }
 
-        // Enforce exactly 768 dimensions for pgvector and cosine similarity consistency
         if (vector.length > 768) {
           vector = this.normalizeVector(vector.slice(0, 768));
         }
@@ -145,7 +137,7 @@ export class EmbeddingService {
         pricingService.recordOperationCost({
           videoId: context?.videoId,
           sceneId: context?.sceneId,
-          model: this.modelName,
+          model: config.modelName,
           inputTokens: tokenCountEstimate,
           outputTokens: 0,
           estimatedCost: cost,
@@ -161,6 +153,229 @@ export class EmbeddingService {
         };
       } catch (err: any) {
         console.warn(`Gemini Embedding API call failed: ${err.message}. Falling back to deterministic local semantic vectorizer.`);
+      }
+    }
+
+    // 2. Anthropic Claude Semantic Embedding (Deep semantic extraction to 768d unit vector)
+    if (config.provider === 'anthropic' && config.apiKey) {
+      try {
+        const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/v1/messages` : 'https://api.anthropic.com/v1/messages';
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': config.apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: normalizeAnthropicModel(config.modelName, 'claude-3-5-haiku-20241022'),
+            max_tokens: 300,
+            system: 'You are an AI semantic embedding encoder. Return a JSON object with top semantic weighted terms, actions, objects, and concepts.',
+            messages: [
+              {
+                role: 'user',
+                content: `Analyze the following text for video vector search and extract the top weighted semantic concepts and keywords (nouns, verbs, themes, visual elements):\n"${text}"\n\nRespond ONLY with valid JSON in this exact structure:\n{"terms": [{"term": "action_or_keyword", "weight": 3.0}]}`,
+              },
+            ],
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          const responseText = data.content?.[0]?.text || '{}';
+          const cleanJson = responseText.replace(/```json\s*|\s*```/g, '').trim();
+          let parsed: { terms?: Array<{ term: string; weight: number }> } = {};
+          try {
+            parsed = JSON.parse(cleanJson);
+          } catch {
+            // ignore json parse error
+          }
+
+          const weightedTerms: Record<string, number> = {};
+          if (Array.isArray(parsed.terms)) {
+            for (const item of parsed.terms) {
+              if (item.term && typeof item.weight === 'number') {
+                weightedTerms[item.term.toLowerCase()] = Math.max(0.5, Math.min(5.0, item.weight));
+              }
+            }
+          }
+
+          const vector = this.computeLocalSemanticVector(text, 768, weightedTerms);
+          const latencyMs = Date.now() - start;
+          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate);
+
+          pricingService.recordOperationCost({
+            videoId: context?.videoId,
+            sceneId: context?.sceneId,
+            model: config.modelName || 'claude-3-5-haiku',
+            inputTokens: tokenCountEstimate,
+            outputTokens: 50,
+            estimatedCost: cost,
+            processingTimeMs: latencyMs,
+            requestType: 'EMBEDDING',
+          });
+
+          return {
+            embedding: vector,
+            dimensions: vector.length,
+            cost,
+            latencyMs,
+          };
+        }
+      } catch (err: any) {
+        console.warn(`Claude Semantic Embedding call failed: ${err.message}.`);
+      }
+    }
+
+    // 3. Voyage AI Embeddings (Anthropic official embedding partner)
+    if (config.provider === 'voyage' && config.apiKey) {
+      try {
+        const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/embeddings` : 'https://api.voyageai.com/v1/embeddings';
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: config.modelName || 'voyage-3',
+            input: text,
+            output_dimension: 768,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          let vector: number[] = data.data?.[0]?.embedding || [];
+          if (vector.length > 768) vector = this.normalizeVector(vector.slice(0, 768));
+          else if (vector.length < 768 && vector.length > 0) {
+            const padded = new Array(768).fill(0);
+            for (let i = 0; i < vector.length; i++) padded[i] = vector[i];
+            vector = this.normalizeVector(padded);
+          }
+
+          const latencyMs = Date.now() - start;
+          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate);
+          return { embedding: vector, dimensions: vector.length, cost, latencyMs };
+        }
+      } catch (err: any) {
+        console.warn(`Voyage AI Embedding call failed: ${err.message}.`);
+      }
+    }
+
+    // 4. Cohere Embeddings
+    if (config.provider === 'cohere' && config.apiKey) {
+      try {
+        const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/embed` : 'https://api.cohere.com/v1/embed';
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: config.modelName || 'embed-english-v3.0',
+            texts: [text],
+            input_type: 'search_document',
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          let vector: number[] = data.embeddings?.[0] || [];
+          if (vector.length > 768) vector = this.normalizeVector(vector.slice(0, 768));
+          else if (vector.length < 768 && vector.length > 0) {
+            const padded = new Array(768).fill(0);
+            for (let i = 0; i < vector.length; i++) padded[i] = vector[i];
+            vector = this.normalizeVector(padded);
+          }
+
+          const latencyMs = Date.now() - start;
+          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate);
+          return { embedding: vector, dimensions: vector.length, cost, latencyMs };
+        }
+      } catch (err: any) {
+        console.warn(`Cohere Embedding call failed: ${err.message}.`);
+      }
+    }
+
+    // 5. Mistral Embeddings
+    if (config.provider === 'mistral' && config.apiKey) {
+      try {
+        const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/embeddings` : 'https://api.mistral.ai/v1/embeddings';
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: config.modelName || 'mistral-embed',
+            input: [text],
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          let vector: number[] = data.data?.[0]?.embedding || [];
+          if (vector.length > 768) vector = this.normalizeVector(vector.slice(0, 768));
+          else if (vector.length < 768 && vector.length > 0) {
+            const padded = new Array(768).fill(0);
+            for (let i = 0; i < vector.length; i++) padded[i] = vector[i];
+            vector = this.normalizeVector(padded);
+          }
+
+          const latencyMs = Date.now() - start;
+          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate);
+          return { embedding: vector, dimensions: vector.length, cost, latencyMs };
+        }
+      } catch (err: any) {
+        console.warn(`Mistral Embedding call failed: ${err.message}.`);
+      }
+    }
+
+    // 6. OpenAI / Ollama / Custom Embeddings
+    if ((config.provider === 'openai' || config.provider === 'groq' || config.provider === 'ollama' || config.provider === 'custom') && (config.apiKey || config.provider === 'ollama')) {
+      try {
+        const url = config.baseUrl
+          ? `${config.baseUrl.replace(/\/+$/, '')}/embeddings`
+          : config.provider === 'ollama'
+          ? 'http://localhost:11434/api/embeddings'
+          : 'https://api.openai.com/v1/embeddings';
+
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (config.apiKey && config.provider !== 'ollama') {
+          headers['Authorization'] = `Bearer ${config.apiKey}`;
+        }
+
+        const body = config.provider === 'ollama'
+          ? { model: config.modelName || 'nomic-embed-text', prompt: text }
+          : { model: config.modelName || 'text-embedding-3-small', input: text, dimensions: 768 };
+
+        const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+        if (res.ok) {
+          const data = await res.json();
+          let vector: number[] = data.data?.[0]?.embedding || data.embedding || [];
+          if (vector.length > 768) {
+            vector = this.normalizeVector(vector.slice(0, 768));
+          } else if (vector.length < 768 && vector.length > 0) {
+            // Pad to 768 if needed
+            const padded = new Array(768).fill(0);
+            for (let i = 0; i < vector.length; i++) padded[i] = vector[i];
+            vector = this.normalizeVector(padded);
+          }
+
+          const latencyMs = Date.now() - start;
+          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate);
+          return {
+            embedding: vector,
+            dimensions: vector.length,
+            cost,
+            latencyMs,
+          };
+        }
+      } catch (err: any) {
+        console.warn(`${config.provider.toUpperCase()} Embedding call failed: ${err.message}.`);
       }
     }
 
@@ -191,12 +406,16 @@ export class EmbeddingService {
   /**
    * Deterministic 768-dimensional normalized vector based on subword hashing and semantic features.
    */
-  public computeLocalSemanticVector(text: string, dimensions = 768): number[] {
+  public computeLocalSemanticVector(
+    text: string,
+    dimensions = 768,
+    customWeights?: Record<string, number>
+  ): number[] {
     const vec = new Float64Array(dimensions);
     const normalized = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
     const tokens = normalized.split(/\s+/).filter(Boolean);
 
-    // Semantic keyword boosting categories
+    // Base semantic keyword boosting categories
     const semanticWeights: Record<string, number> = {
       fight: 3.5,
       fighting: 3.5,
@@ -225,6 +444,7 @@ export class EmbeddingService {
       explosion: 4.0,
       fire: 3.0,
       running: 3.0,
+      ...(customWeights || {}),
     };
 
     // Primary token hashing

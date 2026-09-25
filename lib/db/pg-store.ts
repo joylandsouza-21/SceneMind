@@ -1,5 +1,5 @@
 import { Pool, PoolClient } from 'pg';
-import { Video, VideoGroup, VideoScene, VideoSearch, VideoClip, ProcessingJob, AiCost, VectorRecord } from './types';
+import { Video, VideoGroup, VideoScene, VideoSearch, VideoClip, ProcessingJob, AiCost, VectorRecord, AiModelConfig } from './types';
 import { IStore } from './store.interface';
 
 /**
@@ -24,6 +24,7 @@ export class PgStore implements IStore {
     jobs: ProcessingJob[];
     costs: AiCost[];
     vectors: VectorRecord[];
+    configs: AiModelConfig[];
   } = {
     videos: [],
     groups: [],
@@ -33,6 +34,7 @@ export class PgStore implements IStore {
     jobs: [],
     costs: [],
     vectors: [],
+    configs: [],
   };
   private ready: boolean = false;
   private initPromise: Promise<void>;
@@ -46,6 +48,23 @@ export class PgStore implements IStore {
   /** Hydrate all data from PostgreSQL into in-memory cache on startup */
   private async hydrate(): Promise<void> {
     try {
+      // Ensure ai_configs table exists
+      await this.pool.query(`
+        CREATE TABLE IF NOT EXISTS ai_configs (
+            id VARCHAR(64) PRIMARY KEY,
+            task_type VARCHAR(64) NOT NULL,
+            provider VARCHAR(64) NOT NULL,
+            model_name VARCHAR(128) NOT NULL,
+            api_key TEXT,
+            base_url TEXT,
+            dimensions INT DEFAULT 768,
+            temperature DOUBLE PRECISION DEFAULT 0.2,
+            max_tokens INT,
+            is_active BOOLEAN DEFAULT TRUE,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+
       // Groups
       const groupsRes = await this.pool.query('SELECT * FROM groups_ ORDER BY created_at DESC');
       this.cache.groups = groupsRes.rows.map(this.mapGroup);
@@ -78,8 +97,12 @@ export class PgStore implements IStore {
       const vectorsRes = await this.pool.query('SELECT * FROM vectors');
       this.cache.vectors = vectorsRes.rows.map(this.mapVector);
 
+      // AI Configs
+      const configsRes = await this.pool.query('SELECT * FROM ai_configs ORDER BY updated_at DESC');
+      this.cache.configs = configsRes.rows.map(this.mapConfig);
+
       this.ready = true;
-      console.log(`[db] PostgreSQL hydrated: ${this.cache.videos.length} videos, ${this.cache.scenes.length} scenes, ${this.cache.vectors.length} vectors`);
+      console.log(`[db] PostgreSQL hydrated: ${this.cache.videos.length} videos, ${this.cache.scenes.length} scenes, ${this.cache.vectors.length} vectors, ${this.cache.configs.length} configs`);
     } catch (err) {
       console.error('[db] PostgreSQL hydration failed:', err);
       this.ready = true; // Allow app to proceed with empty data
@@ -385,6 +408,55 @@ export class PgStore implements IStore {
     this.exec('DELETE FROM vectors WHERE id = $1', [id]);
   }
 
+  // --- AI Model & API Configs ---
+  public getAiConfigs(): AiModelConfig[] {
+    return [...this.cache.configs];
+  }
+
+  public getAiConfig(id: string): AiModelConfig | undefined {
+    return this.cache.configs.find(c => c.id === id || c.taskType === id);
+  }
+
+  public upsertAiConfig(config: AiModelConfig): AiModelConfig {
+    const now = new Date().toISOString();
+    const configWithTime = { ...config, updatedAt: now };
+    const idx = this.cache.configs.findIndex(c => c.id === config.id);
+    if (idx >= 0) {
+      this.cache.configs[idx] = configWithTime;
+    } else {
+      this.cache.configs.push(configWithTime);
+    }
+
+    this.exec(`
+      INSERT INTO ai_configs (id, task_type, provider, model_name, api_key, base_url, dimensions, temperature, max_tokens, is_active, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      ON CONFLICT (id) DO UPDATE SET
+        task_type = $2, provider = $3, model_name = $4, api_key = $5, base_url = $6,
+        dimensions = $7, temperature = $8, max_tokens = $9, is_active = $10, updated_at = $11
+    `, [
+      config.id,
+      config.taskType,
+      config.provider,
+      config.modelName,
+      config.apiKey || null,
+      config.baseUrl || null,
+      config.dimensions || 768,
+      config.temperature ?? 0.2,
+      config.maxTokens || null,
+      config.isActive ?? true,
+      now
+    ]);
+
+    return configWithTime;
+  }
+
+  public deleteAiConfig(id: string): boolean {
+    const initialLen = this.cache.configs.length;
+    this.cache.configs = this.cache.configs.filter(c => c.id !== id);
+    this.exec('DELETE FROM ai_configs WHERE id = $1', [id]);
+    return this.cache.configs.length < initialLen;
+  }
+
   // --- Row Mappers ---
   private mapGroup(row: any): VideoGroup {
     return { id: row.id, name: row.name, description: row.description || undefined, color: row.color || undefined, createdAt: row.created_at, updatedAt: row.updated_at };
@@ -458,6 +530,22 @@ export class PgStore implements IStore {
       embedding: Array.isArray(embedding) ? embedding : [],
       text: row.text, metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {}),
       createdAt: row.created_at,
+    };
+  }
+
+  private mapConfig(row: any): AiModelConfig {
+    return {
+      id: row.id,
+      taskType: row.task_type,
+      provider: row.provider,
+      modelName: row.model_name,
+      apiKey: row.api_key || undefined,
+      baseUrl: row.base_url || undefined,
+      dimensions: row.dimensions || 768,
+      temperature: row.temperature != null ? parseFloat(row.temperature) : 0.2,
+      maxTokens: row.max_tokens ? parseInt(row.max_tokens, 10) : undefined,
+      isActive: row.is_active !== false,
+      updatedAt: row.updated_at,
     };
   }
 }

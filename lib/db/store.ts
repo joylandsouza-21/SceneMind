@@ -14,6 +14,7 @@ const defaultData: DatabaseSchema = {
   jobs: [],
   costs: [],
   vectors: [],
+  configs: [],
 };
 
 class Store {
@@ -73,6 +74,7 @@ class Store {
           jobs: parsed.jobs || [],
           costs: parsed.costs || [],
           vectors: parsed.vectors || [],
+          configs: parsed.configs || [],
         };
       }
     } catch (err) {

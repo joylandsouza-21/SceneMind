@@ -2,6 +2,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { GoogleAIFileManager } from '@google/generative-ai/server';
 import { VIDEO_ANALYSIS_SYSTEM_PROMPT, buildVideoAnalysisUserPrompt } from '../../prompts/video-analysis';
 import { pricingService } from './pricing.service';
+import { aiConfigService } from './ai-config.service';
 import fs from 'fs';
 import path from 'path';
 import { Readable } from 'stream';
@@ -29,19 +30,6 @@ export interface VideoAnalysisResult {
 }
 
 export class VideoAnalysisService {
-  private genAI: GoogleGenerativeAI | null = null;
-  private fileManager: GoogleAIFileManager | null = null;
-  private modelName: string;
-
-  constructor() {
-    const apiKey = process.env.GEMINI_API_KEY;
-    this.modelName = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
-    if (apiKey && apiKey.trim() !== '') {
-      this.genAI = new GoogleGenerativeAI(apiKey);
-      this.fileManager = new GoogleAIFileManager(apiKey);
-    }
-  }
-
   /**
    * Stream large video files directly to Google Gemini File API via Resumable Upload
    * Zero-RAM streaming prevents Node.js heap exhaustion on multi-GB files.
@@ -125,14 +113,17 @@ export class VideoAnalysisService {
     const startTime = Date.now();
     const minDur = options?.minDuration ?? 6;
     const maxDur = options?.maxDuration ?? 120;
+    const config = aiConfigService.getEffectiveConfig('video_processing');
 
     // If Gemini API Key is present, attempt live AI analysis
-    if (this.genAI) {
+    if (config.apiKey && config.apiKey.trim() !== '') {
       const result = await this.executeGeminiVideoAnalysis(
         videoPath,
         durationSeconds,
         minDur,
         maxDur,
+        config.apiKey.trim(),
+        config.modelName || 'gemini-3.6-flash',
         options?.videoId,
         options?.videoTitle
       );
@@ -151,12 +142,17 @@ export class VideoAnalysisService {
     durationSeconds: number,
     minDur: number,
     maxDur: number,
+    apiKey: string,
+    modelName: string,
     videoId?: string,
     videoTitle?: string
   ): Promise<VideoAnalysisResult> {
     const startTime = Date.now();
-    const model = this.genAI!.getGenerativeModel({
-      model: this.modelName,
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const fileManager = new GoogleAIFileManager(apiKey);
+
+    const model = genAI.getGenerativeModel({
+      model: modelName,
       systemInstruction: VIDEO_ANALYSIS_SYSTEM_PROMPT,
       generationConfig: {
         responseMimeType: 'application/json',
@@ -174,10 +170,9 @@ export class VideoAnalysisService {
     let promptParts: any[] = [];
 
     // Use Gemini File API to upload the actual video file so Gemini sees the real frames
-    if (this.fileManager && fs.existsSync(videoPath)) {
+    if (fs.existsSync(videoPath)) {
       try {
-        console.log(`[VIDEO_ANALYSIS] Streaming video to Gemini File API: ${path.basename(videoPath)}...`);
-        const apiKey = process.env.GEMINI_API_KEY || '';
+        console.log(`[VIDEO_ANALYSIS] Streaming video to Gemini File API (${modelName}): ${path.basename(videoPath)}...`);
 
         // Use zero-RAM streaming resumable upload
         let uploaded = await this.uploadToGeminiResumable(videoPath, apiKey, {
@@ -185,18 +180,18 @@ export class VideoAnalysisService {
           displayName: path.basename(videoPath),
         }).catch(async (streamErr) => {
           console.warn(`[VIDEO_ANALYSIS] Streamed upload notice (${streamErr.message}), attempting standard upload.`);
-          const uploadResult = await this.fileManager!.uploadFile(videoPath, {
+          const uploadResult = await fileManager.uploadFile(videoPath, {
             mimeType: 'video/mp4',
             displayName: path.basename(videoPath),
           });
           return uploadResult.file;
         });
 
-        let file = await this.fileManager.getFile(uploaded.name);
+        let file = await fileManager.getFile(uploaded.name);
         while (file.state === 'PROCESSING') {
           console.log('[VIDEO_ANALYSIS] Waiting for Gemini video processing...');
           await new Promise((resolve) => setTimeout(resolve, 3000));
-          file = await this.fileManager.getFile(uploaded.name);
+          file = await fileManager.getFile(uploaded.name);
         }
 
         if (file.state === 'ACTIVE') {
@@ -212,21 +207,7 @@ export class VideoAnalysisService {
           console.warn(`[VIDEO_ANALYSIS] Video state is ${file.state}, proceeding with fallback.`);
         }
       } catch (err: any) {
-        console.warn(`[VIDEO_ANALYSIS] Gemini File API upload failed: ${err.message}. Trying inline base64 if under 20MB.`);
-        try {
-          const stats = fs.statSync(videoPath);
-          if (stats.size <= 20 * 1024 * 1024) {
-            const fileBuffer = fs.readFileSync(videoPath);
-            promptParts.push({
-              inlineData: {
-                data: fileBuffer.toString('base64'),
-                mimeType: 'video/mp4',
-              },
-            });
-          }
-        } catch {
-          // Ignore
-        }
+        console.warn(`[VIDEO_ANALYSIS] Gemini File API upload failed: ${err.message}.`);
       }
     }
 
@@ -237,9 +218,9 @@ export class VideoAnalysisService {
     const latencyMs = Date.now() - startTime;
 
     // Clean up temporary Gemini uploaded file to avoid leaving artifacts on Google cloud
-    if (uploadedFile && this.fileManager) {
+    if (uploadedFile && fileManager) {
       try {
-        await this.fileManager.deleteFile(uploadedFile.name);
+        await fileManager.deleteFile(uploadedFile.name);
         console.log(`[VIDEO_ANALYSIS] Cleaned up temporary Gemini file: ${uploadedFile.name}`);
       } catch {
         // Silently ignore cleanup errors
@@ -255,7 +236,7 @@ export class VideoAnalysisService {
 
     pricingService.recordOperationCost({
       videoId,
-      model: this.modelName,
+      model: modelName,
       inputTokens,
       outputTokens,
       estimatedCost,
@@ -269,7 +250,7 @@ export class VideoAnalysisService {
       outputTokens,
       estimatedCost,
       latencyMs,
-      model: this.modelName,
+      model: modelName,
       rawResponse: text,
     };
   }

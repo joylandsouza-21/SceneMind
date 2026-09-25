@@ -1,4 +1,4 @@
-import { Video, VideoGroup, VideoScene, VideoSearch, VideoClip, ProcessingJob, AiCost, VectorRecord } from './types';
+import { Video, VideoGroup, VideoScene, VideoSearch, VideoClip, ProcessingJob, AiCost, VectorRecord, AiModelConfig } from './types';
 
 /**
  * IStore — Unified database interface.
@@ -59,4 +59,10 @@ export interface IStore {
   upsertVector(record: VectorRecord): void;
   getVectors(videoId?: string | string[]): VectorRecord[];
   deleteVector(id: string): void;
+
+  // --- AI Model & API Configs ---
+  getAiConfigs(): AiModelConfig[];
+  getAiConfig(id: string): AiModelConfig | undefined;
+  upsertAiConfig(config: AiModelConfig): AiModelConfig;
+  deleteAiConfig(id: string): boolean;
 }
