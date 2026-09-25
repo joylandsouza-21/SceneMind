@@ -4,6 +4,7 @@ import { VIDEO_ANALYSIS_SYSTEM_PROMPT, buildVideoAnalysisUserPrompt } from '../.
 import { pricingService } from './pricing.service';
 import fs from 'fs';
 import path from 'path';
+import { Readable } from 'stream';
 
 export interface RawDetectedScene {
   startTime: number;
@@ -41,6 +42,75 @@ export class VideoAnalysisService {
     }
   }
 
+  /**
+   * Stream large video files directly to Google Gemini File API via Resumable Upload
+   * Zero-RAM streaming prevents Node.js heap exhaustion on multi-GB files.
+   */
+  private async uploadToGeminiResumable(
+    filePath: string,
+    apiKey: string,
+    metadata: { mimeType: string; displayName: string }
+  ): Promise<{ name: string; uri: string; state: string; mimeType: string }> {
+    const stats = fs.statSync(filePath);
+    const fileSize = stats.size;
+    const uploadEndpoint = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`;
+
+    // Step 1: Start Resumable Upload Session
+    const initRes = await fetch(uploadEndpoint, {
+      method: 'POST',
+      headers: {
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': fileSize.toString(),
+        'X-Goog-Upload-Header-Content-Type': metadata.mimeType,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        file: {
+          display_name: metadata.displayName,
+        },
+      }),
+    });
+
+    if (!initRes.ok) {
+      const errText = await initRes.text();
+      throw new Error(`Gemini resumable upload init failed (${initRes.status}): ${errText}`);
+    }
+
+    const sessionUploadUrl =
+      initRes.headers.get('x-goog-upload-url') ||
+      initRes.headers.get('X-Goog-Upload-URL') ||
+      initRes.headers.get('location');
+
+    if (!sessionUploadUrl) {
+      throw new Error('Gemini API did not return an upload session URL.');
+    }
+
+    // Step 2: Stream the file directly from disk without buffering in memory
+    const fileStream = fs.createReadStream(filePath);
+    const webStream = Readable.toWeb(fileStream);
+
+    const uploadRes = await fetch(sessionUploadUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Length': fileSize.toString(),
+        'X-Goog-Upload-Offset': '0',
+        'X-Goog-Upload-Command': 'upload, finalize',
+      },
+      // @ts-ignore - duplex is needed in Node.js fetch when streaming body
+      duplex: 'half',
+      body: webStream as any,
+    });
+
+    if (!uploadRes.ok) {
+      const errText = await uploadRes.text();
+      throw new Error(`Gemini resumable upload failed (${uploadRes.status}): ${errText}`);
+    }
+
+    const data = await uploadRes.json();
+    return data.file;
+  }
+
   public async analyzeVideo(
     videoPath: string,
     durationSeconds: number,
@@ -57,7 +127,6 @@ export class VideoAnalysisService {
     const maxDur = options?.maxDuration ?? 120;
 
     // If Gemini API Key is present, attempt live AI analysis
-    // If it fails, we throw — callers must handle this and mark the video as failed.
     if (this.genAI) {
       const result = await this.executeGeminiVideoAnalysis(
         videoPath,
@@ -107,17 +176,27 @@ export class VideoAnalysisService {
     // Use Gemini File API to upload the actual video file so Gemini sees the real frames
     if (this.fileManager && fs.existsSync(videoPath)) {
       try {
-        console.log(`[VIDEO_ANALYSIS] Uploading video to Gemini File API: ${path.basename(videoPath)}...`);
-        const uploadResult = await this.fileManager.uploadFile(videoPath, {
+        console.log(`[VIDEO_ANALYSIS] Streaming video to Gemini File API: ${path.basename(videoPath)}...`);
+        const apiKey = process.env.GEMINI_API_KEY || '';
+
+        // Use zero-RAM streaming resumable upload
+        let uploaded = await this.uploadToGeminiResumable(videoPath, apiKey, {
           mimeType: 'video/mp4',
           displayName: path.basename(videoPath),
+        }).catch(async (streamErr) => {
+          console.warn(`[VIDEO_ANALYSIS] Streamed upload notice (${streamErr.message}), attempting standard upload.`);
+          const uploadResult = await this.fileManager!.uploadFile(videoPath, {
+            mimeType: 'video/mp4',
+            displayName: path.basename(videoPath),
+          });
+          return uploadResult.file;
         });
 
-        let file = await this.fileManager.getFile(uploadResult.file.name);
+        let file = await this.fileManager.getFile(uploaded.name);
         while (file.state === 'PROCESSING') {
           console.log('[VIDEO_ANALYSIS] Waiting for Gemini video processing...');
           await new Promise((resolve) => setTimeout(resolve, 3000));
-          file = await this.fileManager.getFile(uploadResult.file.name);
+          file = await this.fileManager.getFile(uploaded.name);
         }
 
         if (file.state === 'ACTIVE') {

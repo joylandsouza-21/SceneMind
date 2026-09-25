@@ -4,6 +4,9 @@ import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 
 export interface IStorageService {
+  createVideoWriteStream(
+    filename: string
+  ): { storageKey: string; absolutePath: string; writeStream: fs.WriteStream };
   saveVideo(
     filename: string,
     data: Buffer | ReadableStream<Uint8Array> | NodeJS.ReadableStream
@@ -42,6 +45,22 @@ export class LocalStorageService implements IStorageService {
 
   private sanitizeFilename(name: string): string {
     return path.basename(name).replace(/[^a-zA-Z0-9._-]/g, '_');
+  }
+
+  public createVideoWriteStream(filename: string): {
+    storageKey: string;
+    absolutePath: string;
+    writeStream: fs.WriteStream;
+  } {
+    this.ensureDirs();
+    const safeName = `${Date.now()}_${this.sanitizeFilename(filename)}`;
+    const fullPath = path.join(this.videosDir, safeName);
+    const writeStream = fs.createWriteStream(fullPath);
+    return {
+      storageKey: `videos/${safeName}`,
+      absolutePath: fullPath,
+      writeStream,
+    };
   }
 
   public async saveVideo(

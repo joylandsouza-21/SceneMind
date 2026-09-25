@@ -1,4 +1,7 @@
 import { IStore } from './store.interface';
+import { PgStore } from './pg-store';
+import { SqliteStore } from './sqlite-store';
+import { JsonStore } from './json-store';
 
 /**
  * Database Factory — auto-selects the right store backend:
@@ -11,10 +14,9 @@ import { IStore } from './store.interface';
 function createStore(): IStore {
   const databaseUrl = process.env.DATABASE_URL;
 
-  if (databaseUrl) {
+  if (databaseUrl && (databaseUrl.startsWith('postgresql://') || databaseUrl.startsWith('postgres://'))) {
     // Docker / Production — use PostgreSQL with pgvector
     try {
-      const { PgStore } = require('./pg-store');
       return new PgStore(databaseUrl);
     } catch (err) {
       console.error('[db] PostgreSQL store failed to initialize:', (err as Error).message);
@@ -24,11 +26,9 @@ function createStore(): IStore {
 
   // Local development — use SQLite
   try {
-    const { SqliteStore } = require('./sqlite-store');
     return new SqliteStore();
   } catch (err) {
     console.warn('[db] SQLite unavailable, falling back to JSON file store:', (err as Error).message);
-    const { JsonStore } = require('./json-store');
     return new JsonStore();
   }
 }

@@ -5,41 +5,127 @@ import { Video } from '@/lib/db/types';
 import { storageService } from '@/lib/services/storage.service';
 import { ffmpegService } from '@/lib/services/ffmpeg.service';
 import { jobQueueService } from '@/lib/services/job-queue.service';
+import { Readable } from 'stream';
+import busboy from 'busboy';
 
 export const dynamic = 'force-dynamic';
 
+interface ParsedUpload {
+  originalName: string;
+  storageKey: string;
+  absolutePath: string;
+  fields: Record<string, string>;
+  fileSize: number;
+}
+
+/**
+ * Stream multipart/form-data directly to disk using busboy
+ * Eliminates multi-gigabyte RAM buffering in Node.js
+ */
+function streamMultipartUpload(req: NextRequest): Promise<ParsedUpload> {
+  return new Promise((resolve, reject) => {
+    const contentType = req.headers.get('content-type') || '';
+    if (!contentType.includes('multipart/form-data')) {
+      return reject(new Error('Invalid content-type. Expected multipart/form-data'));
+    }
+
+    if (!req.body) {
+      return reject(new Error('No request body provided'));
+    }
+
+    const bb = busboy({ headers: { 'content-type': contentType } });
+    const fields: Record<string, string> = {};
+    let fileUploaded = false;
+    let originalName = '';
+    let storageKey = '';
+    let absolutePath = '';
+    let fileSize = 0;
+    let filePromise: Promise<void> | null = null;
+
+    bb.on('file', (name, fileStream, info) => {
+      const filename = info.filename || 'uploaded_video.mp4';
+      originalName = filename;
+      const ext = filename.split('.').pop()?.toLowerCase();
+      const allowed = ['mp4', 'mkv', 'mov', 'webm', 'avi'];
+      if (!ext || !allowed.includes(ext)) {
+        fileStream.resume();
+        return reject(new Error(`Unsupported file format .${ext}. Supported formats: ${allowed.join(', ')}`));
+      }
+
+      const writeInfo = storageService.createVideoWriteStream(filename);
+      storageKey = writeInfo.storageKey;
+      absolutePath = writeInfo.absolutePath;
+      fileUploaded = true;
+
+      filePromise = new Promise((resolveFile, rejectFile) => {
+        fileStream.on('data', (chunk: Buffer) => {
+          fileSize += chunk.length;
+          // Google Gemini File API maximum file size: 2 GB
+          if (fileSize > 2 * 1024 * 1024 * 1024) {
+            writeInfo.writeStream.destroy();
+            storageService.deleteFile(storageKey).catch(() => {});
+            return rejectFile(new Error('File size exceeds Google File API limit of 2 GB.'));
+          }
+        });
+
+        fileStream.pipe(writeInfo.writeStream);
+
+        writeInfo.writeStream.on('finish', () => {
+          resolveFile();
+        });
+
+        writeInfo.writeStream.on('error', (err) => {
+          rejectFile(err);
+        });
+
+        fileStream.on('error', (err) => {
+          writeInfo.writeStream.destroy();
+          rejectFile(err);
+        });
+      });
+    });
+
+    bb.on('field', (name, val) => {
+      fields[name] = val;
+    });
+
+    bb.on('close', async () => {
+      try {
+        if (filePromise) {
+          await filePromise;
+        }
+        if (!fileUploaded) {
+          return reject(new Error('No video file provided'));
+        }
+        resolve({
+          originalName,
+          storageKey,
+          absolutePath,
+          fields,
+          fileSize,
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
+
+    bb.on('error', (err) => {
+      if (storageKey) {
+        storageService.deleteFile(storageKey).catch(() => {});
+      }
+      reject(err);
+    });
+
+    const nodeStream = Readable.fromWeb(req.body as any);
+    nodeStream.pipe(bb);
+  });
+}
+
 export async function POST(req: NextRequest) {
+  let uploadedKey: string | undefined;
   try {
-    const formData = await req.formData();
-    const file = formData.get('file') as File | null;
-
-    if (!file) {
-      return NextResponse.json({ error: 'No video file provided' }, { status: 400 });
-    }
-
-    // Validate video file extension and MIME type
-    const originalName = file.name || 'uploaded_video.mp4';
-    const ext = originalName.split('.').pop()?.toLowerCase();
-    const allowed = ['mp4', 'mkv', 'mov', 'webm', 'avi'];
-    if (!ext || !allowed.includes(ext)) {
-      return NextResponse.json(
-        { error: `Unsupported file format .${ext}. Supported formats: ${allowed.join(', ')}` },
-        { status: 400 }
-      );
-    }
-
-    // Google Gemini File API maximum file size: 2 GB (2048 MB)
-    const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024;
-    if (file.size > MAX_FILE_SIZE) {
-      const sizeGB = (file.size / (1024 * 1024 * 1024)).toFixed(2);
-      return NextResponse.json(
-        { error: `File size (${sizeGB} GB) exceeds Google File API limit of 2 GB.` },
-        { status: 400 }
-      );
-    }
-
-    // Save video to storage via direct stream to avoid buffering huge files in RAM
-    const { storageKey, absolutePath } = await storageService.saveVideo(originalName, file.stream());
+    const { originalName, storageKey, absolutePath, fields } = await streamMultipartUpload(req);
+    uploadedKey = storageKey;
 
     // Extract preliminary metadata via ffprobe
     const metadata = await ffmpegService.getMetadata(absolutePath);
@@ -47,8 +133,8 @@ export async function POST(req: NextRequest) {
     const videoId = `vid_${uuidv4()}`;
 
     // Handle group association
-    let groupId = (formData.get('groupId') as string) || undefined;
-    let groupName = (formData.get('groupName') as string) || undefined;
+    let groupId = fields.groupId || undefined;
+    let groupName = fields.groupName || undefined;
 
     if (groupId) {
       const existingGroup = db.getGroup(groupId);
@@ -94,8 +180,8 @@ export async function POST(req: NextRequest) {
 
     db.upsertVideo(video);
 
-    const isAsync = formData.get('async') === 'true' || req.nextUrl.searchParams.get('async') === 'true';
-    const autoIndex = formData.get('autoIndex') !== 'false';
+    const isAsync = fields.async === 'true' || req.nextUrl.searchParams.get('async') === 'true';
+    const autoIndex = fields.autoIndex !== 'false';
 
     if (isAsync) {
       if (autoIndex) {
@@ -116,17 +202,15 @@ export async function POST(req: NextRequest) {
       try {
         await jobQueueService.processVideoPipeline(videoId);
 
-        // Confirm it finished successfully (pipeline catches its own errors internally)
+        // Confirm it finished successfully
         const finalVideo = db.getVideo(videoId);
         if (finalVideo?.status === 'failed') {
-          // Clean up — delete file and DB record
           await storageService.deleteFile(storageKey);
           db.deleteVideo(videoId);
           const errMsg = finalVideo.errorMessage || 'AI analysis failed. Check your Gemini API key or try again later.';
           return NextResponse.json({ error: errMsg }, { status: 500 });
         }
       } catch (pipelineErr: any) {
-        // Clean up — delete file and DB record
         await storageService.deleteFile(storageKey).catch(() => {});
         db.deleteVideo(videoId);
         console.error(`[UPLOAD] Pipeline failed for ${videoId}:`, pipelineErr);
@@ -144,6 +228,9 @@ export async function POST(req: NextRequest) {
       message: 'Video uploaded and indexed successfully.',
     });
   } catch (err: any) {
+    if (uploadedKey) {
+      storageService.deleteFile(uploadedKey).catch(() => {});
+    }
     console.error('Upload route error:', err);
     return NextResponse.json({ error: err.message || 'Failed to upload video' }, { status: 500 });
   }
