@@ -1,21 +1,3 @@
-# ==============================================================================
-# SceneMind AI — Production Docker Compose (Pre-built Images)
-#
-# Usage:
-#   1. Build & tag the app image on your dev machine:
-#      docker build -t scenemind-app:latest .
-#
-#   2. Save images for transfer:
-#      docker save scenemind-app:latest nginx:alpine pgvector/pgvector:pg16 redis:7-alpine | gzip > scenemind-images.tar.gz
-#
-#   3. On the target system, load images:
-#      docker load < scenemind-images.tar.gz
-#
-#   4. Copy this file + docker/ folder to the target, then run:
-#      docker compose -f docker-compose.prod.yml up -d
-#
-# ==============================================================================
-
 services:
   # ----------------------------------------------------------------------------
   # 1. Reverse Proxy & Accelerated Video Streaming (Nginx)
