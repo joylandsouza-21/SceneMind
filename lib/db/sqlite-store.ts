@@ -117,9 +117,14 @@ export class SqliteStore implements IStore {
         total_steps INTEGER DEFAULT 0,
         retry_count INTEGER DEFAULT 0,
         error TEXT,
+        logs TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      try {
+        this.db.exec("ALTER TABLE jobs ADD COLUMN logs TEXT;");
+      } catch {}
 
       CREATE TABLE IF NOT EXISTS costs (
         id TEXT PRIMARY KEY,
@@ -426,14 +431,15 @@ export class SqliteStore implements IStore {
   public upsertJob(job: ProcessingJob): ProcessingJob {
     const now = new Date().toISOString();
     this.db.prepare(`
-      INSERT INTO jobs (id, video_id, job_type, status, progress, current_step, total_steps, retry_count, error, created_at, updated_at)
-      VALUES (@id, @videoId, @jobType, @status, @progress, @currentStep, @totalSteps, @retryCount, @error, @createdAt, @updatedAt)
+      INSERT INTO jobs (id, video_id, job_type, status, progress, current_step, total_steps, retry_count, error, logs, created_at, updated_at)
+      VALUES (@id, @videoId, @jobType, @status, @progress, @currentStep, @totalSteps, @retryCount, @error, @logs, @createdAt, @updatedAt)
       ON CONFLICT(id) DO UPDATE SET
         status = @status, progress = @progress, current_step = @currentStep, total_steps = @totalSteps,
-        retry_count = @retryCount, error = @error, updated_at = @updatedAt
+        retry_count = @retryCount, error = @error, logs = @logs, updated_at = @updatedAt
     `).run({
       ...job,
       error: job.error || null,
+      logs: JSON.stringify(job.logs || []),
       updatedAt: now,
     });
     return job;
@@ -627,6 +633,13 @@ export class SqliteStore implements IStore {
   }
 
   private mapJob(row: any): ProcessingJob {
+    let logs: string[] = [];
+    if (row.logs) {
+      try {
+        logs = JSON.parse(row.logs);
+      } catch {}
+    }
+
     return {
       id: row.id,
       videoId: row.video_id,
@@ -637,6 +650,7 @@ export class SqliteStore implements IStore {
       totalSteps: row.total_steps,
       retryCount: row.retry_count,
       error: row.error || undefined,
+      logs,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

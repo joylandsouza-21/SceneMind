@@ -25,6 +25,7 @@ import {
 import VideoPlayer, { VideoPlayerRef, formatTime } from '@/components/VideoPlayer';
 import TimelineBar from '@/components/TimelineBar';
 import ClipModal from '@/components/ClipModal';
+import ProcessingLogsConsole from '@/components/ProcessingLogsConsole';
 import { VideoScene } from '@/lib/db/types';
 
 function VideoStudioContent({ params }: { params: { id: string } }) {
@@ -86,8 +87,57 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
 
   useEffect(() => {
     fetchVideoDetails();
-    const interval = setInterval(fetchVideoDetails, 4000);
-    return () => clearInterval(interval);
+    const interval = setInterval(fetchVideoDetails, 3000);
+
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource('/api/events');
+      es.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.videoId === params.id) {
+            setVideo((prev: any) =>
+              prev
+                ? {
+                    ...prev,
+                    status: payload.status === 'completed' ? 'indexed' : payload.status,
+                    processingProgress: payload.progress ?? prev.processingProgress,
+                  }
+                : prev
+            );
+            setJobs((prev) => {
+              const existingIdx = prev.findIndex((j) => j.id === payload.jobId);
+              const updatedJob = {
+                id: payload.jobId,
+                videoId: payload.videoId,
+                jobType: payload.jobType,
+                status: payload.status,
+                progress: payload.progress,
+                currentStep: payload.currentStep,
+                logs: payload.logs || [],
+                error: payload.error,
+                updatedAt: payload.timestamp,
+              };
+              if (existingIdx >= 0) {
+                const copy = [...prev];
+                copy[existingIdx] = updatedJob;
+                return copy;
+              }
+              return [updatedJob, ...prev];
+            });
+
+            if (payload.status === 'completed') {
+              fetchVideoDetails();
+            }
+          }
+        } catch {}
+      };
+    } catch {}
+
+    return () => {
+      clearInterval(interval);
+      if (es) es.close();
+    };
   }, [params.id]);
 
   // Sync active scene based on video currentTime (when not explicitly pinned)
@@ -270,28 +320,39 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
         </div>
       )}
 
-      {/* Processing Status Banner */}
+      {/* Processing Status Banner with Live Terminal Logs */}
       {video.status === 'processing' && (
-        <div className="p-5 rounded-2xl bg-slate-900/90 border border-amber-500/30 space-y-3">
+        <div className="p-5 rounded-2xl bg-slate-900/90 border border-amber-500/30 space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2.5 text-amber-400 font-semibold text-sm">
               <Activity className="w-4 h-4 animate-spin" />
-              <span>Indexing Video in Background...</span>
+              <span>Indexing Video & Analyzing Scenes in Background...</span>
             </div>
             <span className="font-mono text-amber-400 text-sm font-bold">{video.processingProgress}%</span>
           </div>
 
           <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
             <div
-              className="bg-amber-500 h-full rounded-full transition-all duration-300"
+              className="bg-gradient-to-r from-amber-500 to-indigo-500 h-full rounded-full transition-all duration-300"
               style={{ width: `${video.processingProgress}%` }}
             />
           </div>
 
-          <div className="flex flex-wrap items-center justify-between text-xs text-slate-400 pt-1">
-            <span>Current Step: {activeJob?.currentStep || 'Extracting multimodal features...'}</span>
-            <span>Scenes Analyzed: {scenes.length}</span>
+          <div className="flex flex-wrap items-center justify-between text-xs text-slate-400">
+            <span className="text-slate-300 font-medium">
+              Current Step: <strong className="text-amber-300 font-normal">{activeJob?.currentStep || 'Processing video stream...'}</strong>
+            </span>
+            <span>Scenes Analyzed: <strong className="text-white">{scenes.length}</strong></span>
           </div>
+
+          <ProcessingLogsConsole
+            logs={activeJob?.logs || []}
+            currentStep={activeJob?.currentStep}
+            progress={video.processingProgress}
+            status="processing"
+            defaultExpanded={true}
+            title="Live Video Analysis & Transcode Logs"
+          />
         </div>
       )}
 

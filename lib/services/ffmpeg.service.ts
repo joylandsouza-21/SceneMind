@@ -13,7 +13,17 @@ export interface VideoMetadata {
   format: string;
   sizeBytes: number;
   codec: string;
+  pixFmt?: string;
   bitrate: number;
+}
+
+export interface CodecInspectionResult {
+  isWebReady: boolean;
+  videoCodec: string;
+  pixFmt: string;
+  audioCodec: string;
+  audioChannels: number;
+  reason?: string;
 }
 
 export class FFmpegService {
@@ -23,6 +33,134 @@ export class FFmpegService {
   constructor() {
     this.ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
     this.ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
+  }
+
+  public async inspectCodecCompatibility(filePath: string): Promise<CodecInspectionResult> {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File not found: ${filePath}`);
+    }
+
+    const args = [
+      '-v', 'error',
+      '-show_entries', 'stream=codec_name,codec_type,pix_fmt,channels:format=format_name',
+      '-of', 'json',
+      filePath,
+    ];
+
+    try {
+      const { stdout } = await execFileAsync(this.ffprobePath, args);
+      const data = JSON.parse(stdout);
+      const streams = data.streams || [];
+      const videoStream = streams.find((s: any) => s.codec_type === 'video') || {};
+      const audioStream = streams.find((s: any) => s.codec_type === 'audio') || {};
+
+      const videoCodec = (videoStream.codec_name || '').toLowerCase();
+      const pixFmt = (videoStream.pix_fmt || '').toLowerCase();
+      const audioCodec = (audioStream.codec_name || '').toLowerCase();
+      const audioChannels = parseInt(audioStream.channels || '2', 10);
+
+      // Check standard web playback criteria: H.264 / AVC1, 8-bit yuv420p, <= 2 audio channels
+      const isH264 = videoCodec === 'h264' || videoCodec === 'avc1';
+      const is8Bit = pixFmt === 'yuv420p' || pixFmt === 'yuvj420p' || pixFmt === 'rgb24' || !pixFmt.includes('10');
+      const isStereoOrMono = audioChannels <= 2;
+      const isStandardWebAudio = !audioCodec || audioCodec === 'aac' || audioCodec === 'mp3' || audioCodec === 'opus';
+
+      if (isH264 && is8Bit && isStereoOrMono && isStandardWebAudio) {
+        return {
+          isWebReady: true,
+          videoCodec,
+          pixFmt,
+          audioCodec,
+          audioChannels,
+        };
+      }
+
+      const issues: string[] = [];
+      if (!isH264) issues.push(`Video codec "${videoCodec}" is not H.264/AVC`);
+      if (!is8Bit) issues.push(`Color profile "${pixFmt}" (10-bit) unsupported by browsers`);
+      if (!isStereoOrMono) issues.push(`${audioChannels}-channel surround sound needs downmixing to stereo`);
+      if (!isStandardWebAudio) issues.push(`Audio codec "${audioCodec}" requires AAC re-encoding`);
+
+      return {
+        isWebReady: false,
+        videoCodec,
+        pixFmt,
+        audioCodec,
+        audioChannels,
+        reason: issues.join('; '),
+      };
+    } catch (err: any) {
+      console.warn(`[FFMPEG] inspectCodecCompatibility fallback: ${err.message}`);
+      return {
+        isWebReady: true,
+        videoCodec: 'unknown',
+        pixFmt: 'unknown',
+        audioCodec: 'unknown',
+        audioChannels: 2,
+      };
+    }
+  }
+
+  public async transcodeToWebH264(
+    inputVideoPath: string,
+    outputVideoPath: string,
+    onProgress?: (pct: number, statusMsg: string) => void
+  ): Promise<string> {
+    const dir = path.dirname(outputVideoPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    const meta = await this.getMetadata(inputVideoPath).catch(() => ({ duration: 60 }));
+    const totalDuration = Math.max(1, meta.duration || 60);
+
+    return new Promise((resolve, reject) => {
+      const args = [
+        '-i', inputVideoPath,
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-crf', '22',
+        '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac',
+        '-ac', '2',
+        '-b:a', '192k',
+        '-movflags', '+faststart',
+        '-y',
+        outputVideoPath,
+      ];
+
+      const child = spawn(this.ffmpegPath, args);
+      let stderrAccum = '';
+
+      child.stderr.on('data', (data) => {
+        const text = data.toString();
+        stderrAccum += text;
+        const timeMatch = text.match(/time=(\d+):(\d+):(\d+\.\d+)/);
+        if (timeMatch && onProgress) {
+          const hours = parseInt(timeMatch[1], 10);
+          const minutes = parseInt(timeMatch[2], 10);
+          const seconds = parseFloat(timeMatch[3]);
+          const currentSecs = hours * 3600 + minutes * 60 + seconds;
+          const pct = Math.min(99, Math.max(1, Math.round((currentSecs / totalDuration) * 100)));
+          const fpsMatch = text.match(/fps=\s*(\d+)/);
+          const fpsText = fpsMatch ? ` @ ${fpsMatch[1]} fps` : '';
+          onProgress(pct, `Transcoding video (${pct}%${fpsText})...`);
+        }
+      });
+
+      child.on('close', (code) => {
+        if (code === 0 && fs.existsSync(outputVideoPath)) {
+          if (onProgress) onProgress(100, 'Transcode complete (100%)');
+          resolve(outputVideoPath);
+        } else {
+          reject(new Error(`FFmpeg transcode failed with code ${code}: ${stderrAccum.slice(-500)}`));
+        }
+      });
+
+      child.on('error', (err) => {
+        reject(err);
+      });
+    });
   }
 
   public async getMetadata(filePath: string): Promise<VideoMetadata> {

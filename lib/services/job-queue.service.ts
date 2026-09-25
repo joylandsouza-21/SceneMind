@@ -16,6 +16,7 @@ export interface JobEventPayload {
   progress: number;
   currentStep: string;
   error?: string;
+  logs?: string[];
   timestamp: string;
 }
 
@@ -48,7 +49,7 @@ class JobQueueService extends EventEmitter {
     }
 
     if (job) {
-      this.updateJob(job.id, {
+      this.appendJobLog(job.id, '⛔ Processing was cancelled by user.', {
         status: 'cancelled',
         currentStep: 'Processing cancelled by user',
       });
@@ -71,6 +72,9 @@ class JobQueueService extends EventEmitter {
   }
 
   public createJob(videoId: string, jobType: JobType, totalSteps = 100): ProcessingJob {
+    const timeStr = new Date().toTimeString().split(' ')[0];
+    const initialLog = `[${timeStr}] 🚀 Processing pipeline queued for video analysis.`;
+
     const job: ProcessingJob = {
       id: uuidv4(),
       videoId,
@@ -80,6 +84,7 @@ class JobQueueService extends EventEmitter {
       currentStep: 'Job queued',
       totalSteps,
       retryCount: 0,
+      logs: [initialLog],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -102,6 +107,25 @@ class JobQueueService extends EventEmitter {
     return updated;
   }
 
+  public appendJobLog(jobId: string, message: string, updates?: Partial<ProcessingJob>): ProcessingJob | undefined {
+    const job = db.getJob(jobId);
+    if (!job) return undefined;
+
+    const timeStr = new Date().toTimeString().split(' ')[0];
+    const formattedLog = `[${timeStr}] ${message}`;
+    const logs = [...(job.logs || []), formattedLog];
+
+    const updated: ProcessingJob = {
+      ...job,
+      ...updates,
+      logs,
+      updatedAt: new Date().toISOString(),
+    };
+    db.upsertJob(updated);
+    this.emitEvent(updated);
+    return updated;
+  }
+
   private emitEvent(job: ProcessingJob) {
     const payload: JobEventPayload = {
       jobId: job.id,
@@ -111,6 +135,7 @@ class JobQueueService extends EventEmitter {
       progress: job.progress,
       currentStep: job.currentStep,
       error: job.error,
+      logs: job.logs || [],
       timestamp: new Date().toISOString(),
     };
     this.emit('job-progress', payload);
@@ -147,27 +172,118 @@ class JobQueueService extends EventEmitter {
       video.processingProgress = 5;
       db.upsertVideo(video);
 
-      // --- STEP 1: Metadata Extraction (if missing or duration <= 0) ---
-      this.updateJob(job.id, { status: 'processing', progress: 10, currentStep: 'Extracting video metadata' });
+      this.appendJobLog(job.id, `🎬 Initializing processing pipeline for "${video.filename}"...`, {
+        status: 'processing',
+        progress: 5,
+        currentStep: 'Initializing video analysis pipeline',
+      });
+
       const absPath = storageService.getAbsolutePath(video.storagePath);
 
-      if (video.duration <= 0 || !video.width) {
-        console.log(`[VIDEO_METADATA] Probing ${absPath}`);
-        const meta = await ffmpegService.getMetadata(absPath);
-        video.duration = meta.duration;
-        video.width = meta.width;
-        video.height = meta.height;
-        video.fps = meta.fps;
-        video.format = meta.format;
-        video.sizeBytes = meta.sizeBytes;
-        db.upsertVideo(video);
+      // --- STEP 1: Codec Compatibility Check & Automatic Web-Transcoding ---
+      this.appendJobLog(job.id, '🔍 [1/6] Inspecting video stream codecs & container compatibility (FFmpeg)...', {
+        progress: 8,
+        currentStep: 'Inspecting video codecs',
+      });
+
+      const codecCheck = await ffmpegService.inspectCodecCompatibility(absPath);
+
+      if (!codecCheck.isWebReady) {
+        const transcodeStartTime = Date.now();
+        this.appendJobLog(
+          job.id,
+          `⚠️ [1/6] Incompatible format detected: ${codecCheck.reason}. Converting to universal web format (H.264 8-bit / stereo AAC)...`,
+          {
+            progress: 10,
+            currentStep: 'Converting video to web-compatible H.264',
+          }
+        );
+
+        const tempWebPath = absPath.replace(/\.[^/.]+$/, '') + `_web_${Date.now()}.mp4`;
+
+        await ffmpegService.transcodeToWebH264(absPath, tempWebPath, (pct, statusMsg) => {
+          if (this.isCancelled(videoId)) return;
+          const overallPct = 10 + Math.round((pct / 100) * 15);
+          const liveMsg = `Converting video (${pct}%): ${statusMsg}`;
+          this.updateJob(job.id, {
+            progress: overallPct,
+            currentStep: liveMsg,
+          });
+          video.processingProgress = overallPct;
+          db.upsertVideo(video);
+        });
+
+        if (this.isCancelled(videoId)) return;
+
+        const transcodeElapsedSec = Math.round((Date.now() - transcodeStartTime) / 1000);
+
+        // Replace original file with the transcoded web version
+        try {
+          const fs = await import('fs');
+          if (fs.existsSync(absPath)) fs.unlinkSync(absPath);
+          fs.renameSync(tempWebPath, absPath);
+          this.appendJobLog(
+            job.id,
+            `✅ [1/6] Transcode completed in ${transcodeElapsedSec}s! Video is now 100% web-compatible (H.264 8-bit, stereo AAC, faststart streaming enabled).`,
+            {
+              progress: 25,
+              currentStep: 'Transcoding complete',
+            }
+          );
+        } catch (replaceErr: any) {
+          console.warn(`[TRANSCODE] Replace notice: ${replaceErr.message}`);
+        }
+      } else {
+        this.appendJobLog(
+          job.id,
+          `✅ [1/6] Video is already web-ready (${codecCheck.videoCodec.toUpperCase()} 8-bit, ${codecCheck.audioCodec.toUpperCase() || 'AAC'}). Skipping transcode.`,
+          {
+            progress: 25,
+            currentStep: 'Video codec verified',
+          }
+        );
       }
 
       if (this.isCancelled(videoId)) return;
 
-      // --- STEP 2: Scene Segmentation & Multimodal Analysis ---
-      this.updateJob(job.id, { progress: 30, currentStep: 'Analyzing visual scenes with Gemini Video AI' });
-      console.log(`[SCENE_DETECTION] Analyzing video duration: ${video.duration}s`);
+      // --- STEP 2: Metadata Extraction & Poster Frame ---
+      this.appendJobLog(job.id, '📊 [2/6] Extracting video metadata (resolution, frame rate, exact duration)...', {
+        progress: 28,
+        currentStep: 'Extracting video metadata',
+      });
+
+      const meta = await ffmpegService.getMetadata(absPath);
+      video.duration = meta.duration;
+      video.width = meta.width;
+      video.height = meta.height;
+      video.fps = meta.fps;
+      video.format = meta.format;
+      video.sizeBytes = meta.sizeBytes;
+      db.upsertVideo(video);
+
+      this.appendJobLog(
+        job.id,
+        `📐 [2/6] Video specs: ${meta.width}x${meta.height} @ ${meta.fps} FPS, duration ${Math.round(meta.duration)}s (${(meta.sizeBytes / (1024 * 1024)).toFixed(1)} MB).`,
+        { progress: 30 }
+      );
+
+      // Generate initial thumbnail
+      try {
+        const thumbName = `thumb_${video.id}.jpg`;
+        const thumbPath = storageService.getAbsolutePath(`thumbnails/${thumbName}`);
+        await ffmpegService.extractThumbnail(absPath, Math.min(2, video.duration * 0.1), thumbPath);
+        this.appendJobLog(job.id, '🖼️ [2/6] Generated poster thumbnail.', { progress: 32 });
+      } catch (e) {
+        console.warn('Initial thumbnail skipped:', e);
+      }
+
+      if (this.isCancelled(videoId)) return;
+
+      // --- STEP 3: Multimodal Scene Analysis via Gemini Video AI ---
+      this.appendJobLog(job.id, '🧠 [3/6] Requesting AI multimodal vision scene breakdown from Gemini...', {
+        progress: 35,
+        currentStep: 'Analyzing scenes with Gemini AI',
+      });
 
       let scenes = db.getScenes(videoId);
       if (scenes.length === 0 || options?.forceReindex) {
@@ -176,6 +292,17 @@ class JobQueueService extends EventEmitter {
           videoTitle: video.filename || video.originalName,
           minDuration: 6,
           maxDuration: 120,
+          onProgress: (stepMsg, pct) => {
+            if (this.isCancelled(videoId)) return;
+            this.appendJobLog(job.id, `🤖 [Gemini AI] ${stepMsg}`, {
+              progress: pct || 45,
+              currentStep: stepMsg,
+            });
+            if (pct) {
+              video.processingProgress = pct;
+              db.upsertVideo(video);
+            }
+          },
         });
 
         // Convert raw detected scenes to VideoScene records
@@ -199,12 +326,35 @@ class JobQueueService extends EventEmitter {
 
         db.replaceScenesForVideo(videoId, newScenes);
         scenes = newScenes;
+
+        this.appendJobLog(
+          job.id,
+          `✨ [3/6] Successfully detected and structured ${scenes.length} distinct scenes with timestamps, actions, and character tags.`,
+          {
+            progress: 60,
+            currentStep: `Extracted ${scenes.length} scenes`,
+          }
+        );
+      } else {
+        this.appendJobLog(job.id, `⚡ [3/6] Found ${scenes.length} existing scenes in database. Re-using cached breakdown.`, {
+          progress: 60,
+          currentStep: `Loaded ${scenes.length} scenes`,
+        });
       }
 
-      this.updateJob(job.id, { progress: 55, currentStep: `Identified ${scenes.length} scenes. Generating embeddings` });
+      if (this.isCancelled(videoId)) return;
 
-      // --- STEP 3: Idempotent Vector Embedding Generation ---
+      // --- STEP 4: Vector Embeddings Generation ---
       const totalScenes = scenes.length;
+      this.appendJobLog(
+        job.id,
+        `⚡ [4/6] Generating text & visual vector embeddings for ${totalScenes} scenes for semantic AI search...`,
+        {
+          progress: 65,
+          currentStep: `Generating vector embeddings (0/${totalScenes})`,
+        }
+      );
+
       for (let i = 0; i < totalScenes; i++) {
         if (this.isCancelled(videoId)) {
           console.log(`[JOB_QUEUE] Pipeline cancelled during embedding for video ${videoId}`);
@@ -227,7 +377,6 @@ class JobQueueService extends EventEmitter {
           events: scene.events,
         });
 
-        console.log(`[EMBEDDING] Generating vector for Scene #${scene.sceneNumber} (${scene.startTime}s - ${scene.endTime}s)`);
         const { embedding } = await embeddingService.generateEmbedding(canonicalText, {
           videoId,
           sceneId: scene.id,
@@ -255,11 +404,23 @@ class JobQueueService extends EventEmitter {
         scene.embeddingId = vectorId;
         db.upsertScene(scene);
 
-        const currentPct = 55 + Math.round(((i + 1) / totalScenes) * 35);
-        this.updateJob(job.id, {
-          progress: currentPct,
-          currentStep: `Embedded scene ${i + 1} of ${totalScenes}`,
-        });
+        const currentPct = 65 + Math.round(((i + 1) / totalScenes) * 30);
+
+        if ((i + 1) % 5 === 0 || i === 0 || i === totalScenes - 1) {
+          this.appendJobLog(
+            job.id,
+            `📌 [5/6] Indexed vector for Scene #${scene.sceneNumber} [${scene.startTime}s - ${scene.endTime}s]: "${scene.description.slice(0, 50)}..."`,
+            {
+              progress: currentPct,
+              currentStep: `Embedded scene ${i + 1} of ${totalScenes}`,
+            }
+          );
+        } else {
+          this.updateJob(job.id, {
+            progress: currentPct,
+            currentStep: `Embedded scene ${i + 1} of ${totalScenes}`,
+          });
+        }
 
         video.processingProgress = currentPct;
         db.upsertVideo(video);
@@ -267,31 +428,26 @@ class JobQueueService extends EventEmitter {
 
       if (this.isCancelled(videoId)) return;
 
-      // --- STEP 4: Index Finalization ---
-      this.updateJob(job.id, {
-        progress: 95,
-        currentStep: 'Finalizing vector search index and poster thumbnails',
+      // --- STEP 5: Index Finalization ---
+      this.appendJobLog(job.id, '🎯 [6/6] Finalizing vector search indexes and search capabilities...', {
+        progress: 98,
+        currentStep: 'Finalizing index',
       });
-
-      // Extract a thumbnail from the first scene if possible
-      try {
-        const thumbName = `thumb_${video.id}.jpg`;
-        const thumbPath = storageService.getAbsolutePath(`thumbnails/${thumbName}`);
-        await ffmpegService.extractThumbnail(absPath, Math.min(2, video.duration * 0.1), thumbPath);
-      } catch (e) {
-        console.warn('Thumbnail generation skipped or failed:', e);
-      }
 
       video.status = 'indexed';
       video.processingProgress = 100;
       video.errorMessage = undefined;
       db.upsertVideo(video);
 
-      this.updateJob(job.id, {
-        status: 'completed',
-        progress: 100,
-        currentStep: 'Indexing complete and ready for semantic search',
-      });
+      this.appendJobLog(
+        job.id,
+        `🎉 Pipeline complete! ${scenes.length} scenes indexed and fully ready for multi-modal semantic search & clipping.`,
+        {
+          status: 'completed',
+          progress: 100,
+          currentStep: 'Indexing complete and ready for search',
+        }
+      );
 
       console.log(`[INDEX_FINALIZATION] Completed successfully for video ${video.id}`);
     } catch (err: any) {
@@ -305,7 +461,7 @@ class JobQueueService extends EventEmitter {
       video.errorMessage = err.message || 'Unknown processing error';
       db.upsertVideo(video);
 
-      this.updateJob(job.id, {
+      this.appendJobLog(job.id, `❌ Processing failed: ${err.message}`, {
         status: 'failed',
         error: err.message,
         currentStep: `Failed: ${err.message}`,

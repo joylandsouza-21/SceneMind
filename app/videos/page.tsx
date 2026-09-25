@@ -25,15 +25,18 @@ import {
 import { formatTime } from '@/components/VideoPlayer';
 import BulkUploadQueueModal from '@/components/BulkUploadQueueModal';
 import GroupSelectDropdown from '@/components/GroupSelectDropdown';
+import ProcessingLogsConsole from '@/components/ProcessingLogsConsole';
 
 export default function VideosPage() {
   const [videos, setVideos] = useState<any[]>([]);
   const [groups, setGroups] = useState<any[]>([]);
+  const [jobs, setJobs] = useState<any[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<string>('all');
   const [loading, setLoading] = useState(true);
   const [dragActive, setDragActive] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState(false);
   const [fileDetails, setFileDetails] = useState<any | null>(null);
   const [singleUploadGroupId, setSingleUploadGroupId] = useState<string>('');
   const [uploading, setUploading] = useState(false);
@@ -77,7 +80,9 @@ export default function VideosPage() {
       const res = await fetch('/api/jobs');
       if (res.ok) {
         const data = await res.json();
-        const active = (data.jobs || []).filter(
+        const jobList = data.jobs || [];
+        setJobs(jobList);
+        const active = jobList.filter(
           (j: any) => j.status === 'processing' || j.status === 'pending'
         ).length;
         setActiveJobsCount(active);
@@ -96,14 +101,82 @@ export default function VideosPage() {
   useEffect(() => {
     refreshAll();
     const interval = setInterval(refreshAll, 4000);
-    return () => clearInterval(interval);
+
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource('/api/events');
+      es.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.videoId) {
+            setVideos((prev) =>
+              prev.map((v) =>
+                v.id === payload.videoId
+                  ? {
+                      ...v,
+                      status: payload.status === 'completed' ? 'indexed' : payload.status,
+                      processingProgress: payload.progress ?? v.processingProgress,
+                    }
+                  : v
+              )
+            );
+            setJobs((prev) => {
+              const existingIdx = prev.findIndex((j) => j.id === payload.jobId);
+              const updatedJob = {
+                id: payload.jobId,
+                videoId: payload.videoId,
+                jobType: payload.jobType,
+                status: payload.status,
+                progress: payload.progress,
+                currentStep: payload.currentStep,
+                logs: payload.logs || [],
+                error: payload.error,
+                updatedAt: payload.timestamp,
+              };
+              if (existingIdx >= 0) {
+                const copy = [...prev];
+                copy[existingIdx] = updatedJob;
+                return copy;
+              }
+              return [updatedJob, ...prev];
+            });
+
+            if (payload.status === 'completed') {
+              refreshAll();
+            }
+          }
+        } catch {}
+      };
+    } catch {}
+
+    return () => {
+      clearInterval(interval);
+      if (es) es.close();
+    };
   }, []);
 
-  const handleFileSelect = (file: File) => {
+  const handleFileSelect = async (file: File) => {
     setErrorMsg(null);
     setSelectedFile(file);
     const url = URL.createObjectURL(file);
     setPreviewUrl(url);
+
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    let isNonWeb = ext === 'mkv' || ext === 'avi' || ext === 'mov' || ext === 'wmv' || ext === 'flv';
+    let detectedCodecLabel = isNonWeb ? ext?.toUpperCase() || 'Non-Web' : '';
+
+    // Inspect MP4 header box for HEVC / H.265 fourCC markers (hev1, hvc1, hevc)
+    try {
+      const slice = file.slice(0, 512 * 1024);
+      const buffer = await slice.arrayBuffer();
+      const text = new TextDecoder('latin1').decode(new Uint8Array(buffer));
+      if (text.includes('hev1') || text.includes('hvc1') || text.includes('hevc')) {
+        isNonWeb = true;
+        detectedCodecLabel = 'HEVC / H.265 MP4';
+      }
+    } catch {}
+
+    setPreviewError(isNonWeb);
 
     const tempVideo = document.createElement('video');
     tempVideo.preload = 'metadata';
@@ -115,7 +188,20 @@ export default function VideosPage() {
         duration: tempVideo.duration || 0,
         width: tempVideo.videoWidth || 1280,
         height: tempVideo.videoHeight || 720,
-        type: file.type || 'video/mp4',
+        type: detectedCodecLabel || file.type || `video/${ext || 'mp4'}`,
+        codecLabel: detectedCodecLabel,
+      });
+    };
+    tempVideo.onerror = () => {
+      setPreviewError(true);
+      setFileDetails({
+        name: file.name,
+        sizeMB: (file.size / (1024 * 1024)).toFixed(2),
+        duration: 0,
+        width: 1920,
+        height: 1080,
+        type: detectedCodecLabel || file.type || `video/${ext || 'mp4'}`,
+        codecLabel: detectedCodecLabel || 'HEVC / Non-Web',
       });
     };
   };
@@ -144,21 +230,22 @@ export default function VideosPage() {
 
     setUploading(true);
     setErrorMsg(null);
-    setUploadProgress(15);
-    setProcessingStage('Uploading video file...');
+    setUploadProgress(20);
+    setProcessingStage('Streaming video to server storage...');
 
     const formData = new FormData();
     formData.append('file', selectedFile);
     formData.append('autoIndex', 'true');
+    formData.append('async', 'true');
     if (singleUploadGroupId) {
       formData.append('groupId', singleUploadGroupId);
     }
 
     try {
-      setUploadProgress(50);
-      setProcessingStage('Extracting metadata & storing...');
+      setUploadProgress(60);
+      setProcessingStage('Starting AI indexing pipeline...');
 
-      const res = await fetch('/api/videos/upload', {
+      const res = await fetch('/api/videos/upload?async=true', {
         method: 'POST',
         body: formData,
       });
@@ -169,11 +256,11 @@ export default function VideosPage() {
       }
 
       setUploadProgress(100);
-      setProcessingStage('Indexing initiated! Redirecting to video studio...');
+      setProcessingStage('Upload complete! Redirecting to live studio monitor...');
       refreshAll();
       setTimeout(() => {
         window.location.href = `/videos/${data.video.id}`;
-      }, 1000);
+      }, 500);
     } catch (err: any) {
       setErrorMsg(err.message);
       setUploading(false);
@@ -362,10 +449,52 @@ export default function VideosPage() {
               </button>
             </div>
 
+            {/* Non-Web Format Auto-Transcoding Banner */}
+            {previewError && (
+              <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/40 via-indigo-950/30 to-slate-900/60 border border-amber-500/40 flex items-start gap-3.5 text-xs">
+                <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0 mt-0.5">
+                  <Sparkles className="w-4 h-4" />
+                </div>
+                <div className="space-y-1.5 min-w-0">
+                  <p className="font-bold text-amber-300 text-sm">
+                    This format is currently not supported for direct browser preview ({fileDetails.codecLabel || fileDetails.name.split('.').pop()?.toUpperCase()})
+                  </p>
+                  <p className="text-slate-300 text-xs leading-relaxed">
+                    Raw {fileDetails.codecLabel || fileDetails.name.split('.').pop()?.toUpperCase()} files cannot be decoded directly inside standard web browsers prior to upload.
+                  </p>
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-semibold text-xs mt-1">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>When you upload, it will be automatically converted to a supported web format (H.264).</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="grid grid-cols-1 md:grid-cols-3 gap-5 items-center">
               {previewUrl && (
-                <div className="aspect-video rounded-xl overflow-hidden bg-black border border-slate-800">
-                  <video src={previewUrl} controls className="w-full h-full object-contain" />
+                <div className="aspect-video rounded-xl overflow-hidden bg-slate-950 border border-slate-800 flex items-center justify-center relative p-3">
+                  {!previewError ? (
+                    <video
+                      src={previewUrl}
+                      controls
+                      onError={() => setPreviewError(true)}
+                      className="w-full h-full object-contain"
+                    />
+                  ) : (
+                    <div className="p-4 text-center space-y-2.5 max-w-sm">
+                      <div className="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-400 flex items-center justify-center mx-auto">
+                        <Film className="w-4 h-4" />
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-xs font-bold text-amber-300">
+                          This format is currently not supported for browser preview ({fileDetails.codecLabel || fileDetails.name.split('.').pop()?.toUpperCase()})
+                        </p>
+                        <p className="text-[11px] text-slate-300 leading-snug">
+                          When you upload, it will be automatically converted to supported web format (H.264).
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -381,13 +510,15 @@ export default function VideosPage() {
                   <span className="font-semibold text-slate-200 block mt-0.5">{fileDetails.sizeMB} MB</span>
                 </div>
                 <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800">
-                  <span className="text-slate-500 block">Est. Duration</span>
-                  <span className="font-semibold text-slate-200 block mt-0.5">{formatTime(fileDetails.duration)}</span>
+                  <span className="text-slate-500 block">Format</span>
+                  <span className="font-semibold text-indigo-300 uppercase block mt-0.5">
+                    {fileDetails.name.split('.').pop() || 'Video'}
+                  </span>
                 </div>
                 <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800">
-                  <span className="text-slate-500 block">Resolution</span>
-                  <span className="font-semibold text-slate-200 block mt-0.5">
-                    {fileDetails.width}x{fileDetails.height}
+                  <span className="text-slate-500 block">Conversion</span>
+                  <span className="font-semibold text-emerald-400 block mt-0.5">
+                    {previewError ? '⚡ Auto H.264' : '✅ Web Native'}
                   </span>
                 </div>
               </div>
@@ -701,20 +832,37 @@ export default function VideosPage() {
                       </div>
                     </div>
 
-                    {video.status === 'processing' && (
-                      <div className="space-y-1 pt-1">
-                        <div className="flex justify-between text-[11px] text-amber-400">
-                          <span>Indexing video...</span>
-                          <span>{video.processingProgress}%</span>
-                        </div>
-                        <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                          <div
-                            className="bg-amber-500 h-full rounded-full transition-all duration-300"
-                            style={{ width: `${video.processingProgress}%` }}
+                    {video.status === 'processing' && (() => {
+                      const videoJob = jobs.find(
+                        (j) => j.videoId === video.id && (j.status === 'processing' || j.status === 'pending')
+                      );
+                      return (
+                        <div className="space-y-2 pt-1">
+                          <div className="flex justify-between items-center text-[11px] text-amber-400">
+                            <span className="truncate pr-2 font-medium">
+                              {videoJob?.currentStep || 'Processing video stream...'}
+                            </span>
+                            <span className="font-mono font-bold shrink-0">{video.processingProgress}%</span>
+                          </div>
+                          <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                            <div
+                              className="bg-gradient-to-r from-amber-500 to-indigo-500 h-full rounded-full transition-all duration-300"
+                              style={{ width: `${video.processingProgress}%` }}
+                            />
+                          </div>
+
+                          <ProcessingLogsConsole
+                            logs={videoJob?.logs || []}
+                            currentStep={videoJob?.currentStep}
+                            progress={video.processingProgress}
+                            status="processing"
+                            isCompact={true}
+                            defaultExpanded={false}
+                            title="Live Step Logs"
                           />
                         </div>
-                      </div>
-                    )}
+                      );
+                    })()}
 
                     {video.status === 'failed' && (
                       <div className="flex items-start gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30">

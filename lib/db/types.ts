@@ -96,6 +96,7 @@ export interface ProcessingJob {
   totalSteps: number;
   retryCount: number;
   error?: string;
+  logs?: string[];
   createdAt: string;
   updatedAt: string;
 }

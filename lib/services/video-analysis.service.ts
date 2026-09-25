@@ -108,6 +108,7 @@ export class VideoAnalysisService {
       samplingInterval?: number;
       videoId?: string;
       videoTitle?: string;
+      onProgress?: (step: string, percent?: number) => void;
     }
   ): Promise<VideoAnalysisResult> {
     const startTime = Date.now();
@@ -123,14 +124,18 @@ export class VideoAnalysisService {
         minDur,
         maxDur,
         config.apiKey.trim(),
-        config.modelName || 'gemini-3.6-flash',
+        config.modelName || 'gemini-2.0-flash',
         options?.videoId,
-        options?.videoTitle
+        options?.videoTitle,
+        options?.onProgress
       );
       return result;
     }
 
     // No API key — Keyless / Demo mode: use the intelligent simulator
+    if (options?.onProgress) {
+      options.onProgress('No Gemini API key configured. Generating intelligent scene breakdown via local semantic engine...', 35);
+    }
     console.info('[VIDEO_ANALYSIS] No Gemini API key configured. Running in demo/simulator mode.');
     const result = this.simulateIntelligentSceneSegmentation(durationSeconds, minDur, maxDur, options?.videoId);
     result.latencyMs = Date.now() - startTime;
@@ -145,7 +150,8 @@ export class VideoAnalysisService {
     apiKey: string,
     modelName: string,
     videoId?: string,
-    videoTitle?: string
+    videoTitle?: string,
+    onProgress?: (step: string, percent?: number) => void
   ): Promise<VideoAnalysisResult> {
     const startTime = Date.now();
     const genAI = new GoogleGenerativeAI(apiKey);
@@ -172,7 +178,11 @@ export class VideoAnalysisService {
     // Use Gemini File API to upload the actual video file so Gemini sees the real frames
     if (fs.existsSync(videoPath)) {
       try {
-        console.log(`[VIDEO_ANALYSIS] Streaming video to Gemini File API (${modelName}): ${path.basename(videoPath)}...`);
+        const stats = fs.statSync(videoPath);
+        const sizeMB = Math.round((stats.size / (1024 * 1024)) * 10) / 10;
+        const msg = `Streaming video (${sizeMB} MB) to Google Gemini File API (${modelName})...`;
+        console.log(`[VIDEO_ANALYSIS] ${msg}`);
+        if (onProgress) onProgress(msg, 32);
 
         // Use zero-RAM streaming resumable upload
         let uploaded = await this.uploadToGeminiResumable(videoPath, apiKey, {
@@ -187,15 +197,23 @@ export class VideoAnalysisService {
           return uploadResult.file;
         });
 
+        if (onProgress) onProgress(`Video stream sent to Gemini. Waiting for frame processing state (ACTIVE)...`, 38);
+
         let file = await fileManager.getFile(uploaded.name);
+        let pollCount = 0;
         while (file.state === 'PROCESSING') {
-          console.log('[VIDEO_ANALYSIS] Waiting for Gemini video processing...');
+          pollCount++;
+          const waitMsg = `Waiting for Gemini video frame processing (${pollCount * 3}s elapsed)...`;
+          console.log(`[VIDEO_ANALYSIS] ${waitMsg}`);
+          if (onProgress) onProgress(waitMsg, Math.min(48, 38 + pollCount * 2));
           await new Promise((resolve) => setTimeout(resolve, 3000));
           file = await fileManager.getFile(uploaded.name);
         }
 
         if (file.state === 'ACTIVE') {
-          console.log(`[VIDEO_ANALYSIS] Video ready in Gemini File API. Performing multimodal scene analysis...`);
+          const readyMsg = `Video active in Gemini File API. Performing multi-modal visual scene analysis with ${modelName}...`;
+          console.log(`[VIDEO_ANALYSIS] ${readyMsg}`);
+          if (onProgress) onProgress(readyMsg, 50);
           uploadedFile = file;
           promptParts.push({
             fileData: {
@@ -208,6 +226,7 @@ export class VideoAnalysisService {
         }
       } catch (err: any) {
         console.warn(`[VIDEO_ANALYSIS] Gemini File API upload failed: ${err.message}.`);
+        if (onProgress) onProgress(`Gemini direct stream failed (${err.message}). Falling back to narrative analysis...`, 45);
       }
     }
 

@@ -23,6 +23,7 @@ import {
 
 import { formatTime } from '@/components/VideoPlayer';
 import GroupSelectDropdown from '@/components/GroupSelectDropdown';
+import ProcessingLogsConsole from '@/components/ProcessingLogsConsole';
 
 export interface QueueItem {
   id: string; // client id or videoId
@@ -37,6 +38,7 @@ export interface QueueItem {
   groupId?: string;
   groupName?: string;
   error?: string;
+  logs?: string[];
 }
 
 interface BulkUploadQueueModalProps {
@@ -132,6 +134,7 @@ export default function BulkUploadQueueModal({
                 progress: updatedProgress,
                 stage: updatedStage,
                 jobId: remoteJob?.id || item.jobId,
+                logs: remoteJob?.logs || item.logs || [],
                 error: updatedError,
               };
             })
@@ -621,6 +624,13 @@ export default function BulkUploadQueueModal({
                               {item.groupName}
                             </span>
                           )}
+                          {(item.name.toLowerCase().endsWith('.mkv') ||
+                            item.name.toLowerCase().endsWith('.avi') ||
+                            item.name.toLowerCase().endsWith('.mov')) && (
+                            <span className="px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/25 text-amber-300 text-[9px] font-medium shrink-0">
+                              ⚡ Auto-Transcode
+                            </span>
+                          )}
                         </div>
                         <p className="text-[11px] text-slate-500 mt-0.5">{item.sizeMB} MB</p>
                       </div>
@@ -706,17 +716,29 @@ export default function BulkUploadQueueModal({
 
                   {/* Progress & Stage Details */}
                   {(item.status === 'processing' || item.status === 'uploading') && (
-                    <div className="space-y-1.5 pt-1 border-t border-slate-800/60">
+                    <div className="space-y-2 pt-1 border-t border-slate-800/60">
                       <div className="flex items-center justify-between text-[11px]">
-                        <span className="text-amber-400 truncate max-w-md">{item.stage}</span>
-                        <span className="font-mono text-slate-400">{item.progress}%</span>
+                        <span className="text-amber-400 truncate max-w-md font-medium">{item.stage}</span>
+                        <span className="font-mono text-amber-400 font-bold">{item.progress}%</span>
                       </div>
                       <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
                         <div
-                          className="bg-amber-500 h-full rounded-full transition-all duration-300"
+                          className="bg-gradient-to-r from-amber-500 to-indigo-500 h-full rounded-full transition-all duration-300"
                           style={{ width: `${item.progress}%` }}
                         />
                       </div>
+
+                      {item.logs && item.logs.length > 0 && (
+                        <ProcessingLogsConsole
+                          logs={item.logs}
+                          currentStep={item.stage}
+                          progress={item.progress}
+                          status={item.status}
+                          isCompact={true}
+                          defaultExpanded={false}
+                          title="Pipeline Logs"
+                        />
+                      )}
                     </div>
                   )}
 
