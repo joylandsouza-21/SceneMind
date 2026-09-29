@@ -189,14 +189,27 @@ function MatchedSegmentsAccordion({
               return (
                 <div
                   key={sm.segmentId}
-                  className="text-[11px] text-slate-400 leading-relaxed pl-2 border-l-2 border-slate-800 flex items-start gap-1.5"
+                  className="text-[11px] text-slate-400 leading-relaxed pl-2 border-l-2 border-slate-800 hover:border-indigo-500/60 transition-colors flex items-start gap-1.5 cursor-default relative group/partpop"
                 >
                   <span className={`font-semibold shrink-0 ${colorCls.text}`}>
                     {sm.segmentLabel}:
                   </span>
-                  <span className="line-clamp-2 text-slate-300">
-                    "{sm.segmentText}"
-                  </span>
+                  <div className="flex-1 relative">
+                    <span className="line-clamp-2 text-slate-300 block">
+                      "{sm.segmentText}"
+                    </span>
+
+                    {/* Floating Popover on Hover (Does NOT change row height) */}
+                    {sm.segmentText && sm.segmentText.length > 60 && (
+                      <div className="absolute left-0 bottom-full mb-1.5 z-50 hidden group-hover/partpop:block p-3 rounded-xl bg-slate-950/98 border border-slate-700/90 shadow-2xl backdrop-blur-xl text-xs text-slate-100 leading-relaxed max-w-md max-h-56 overflow-y-auto pointer-events-none animate-in fade-in zoom-in-95 duration-100">
+                        <div className="text-[10px] font-semibold text-indigo-300 pb-1 mb-1 border-b border-slate-800 flex items-center justify-between">
+                          <span>{sm.segmentLabel} • {Math.round(sm.similarity * 100)}% match</span>
+                          <span className="text-slate-500 text-[9px]">Full Part Text</span>
+                        </div>
+                        <p className="whitespace-pre-wrap text-slate-200">"{sm.segmentText}"</p>
+                      </div>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -918,9 +931,33 @@ function GlobalSearchContent() {
                         </span>
                       </div>
 
-                      <p className={`text-xs leading-relaxed line-clamp-3 ${isSelected ? 'text-white font-medium' : 'text-slate-300'}`}>
-                        "{seg.text}"
-                      </p>
+                      <div className="relative flex-1 group/partbox">
+                        <p
+                          className={`text-xs leading-relaxed line-clamp-3 ${
+                            isSelected ? 'text-white font-medium' : 'text-slate-300'
+                          }`}
+                        >
+                          "{seg.text}"
+                        </p>
+
+                        {/* Floating full-text popover on hover (Zero height increase on card) */}
+                        {seg.text && (
+                          <div className="absolute left-0 right-0 bottom-full mb-2 z-50 hidden group-hover/partbox:block p-3.5 rounded-2xl bg-slate-950/98 border border-slate-700/90 shadow-2xl backdrop-blur-xl text-xs text-slate-100 leading-relaxed max-h-60 overflow-y-auto pointer-events-none animate-in fade-in zoom-in-95 duration-100">
+                            <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-slate-800 text-[10px] text-slate-400 font-semibold">
+                              <span className="flex items-center gap-1.5">
+                                <span className={`w-3.5 h-3.5 rounded-full ${color.badge} flex items-center justify-center text-[9px] font-bold`}>
+                                  {seg.index}
+                                </span>
+                                <span className="text-white">{seg.label}</span>
+                              </span>
+                              <span className="font-mono text-slate-400">{seg.wordCount} words</span>
+                            </div>
+                            <p className="whitespace-pre-wrap text-slate-200 leading-relaxed text-xs">
+                              "{seg.text}"
+                            </p>
+                          </div>
+                        )}
+                      </div>
 
                       <div className="flex items-center justify-between text-[10px] text-slate-500 pt-1">
                         <span>{seg.wordCount} words</span>
