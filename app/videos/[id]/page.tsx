@@ -65,6 +65,8 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
 
   const playerRef = useRef<VideoPlayerRef | null>(null);
   const hasScrolledRef = useRef(false);
+  const isSeekingSceneRef = useRef(false);
+  const seekTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const fetchGroups = async () => {
     try {
@@ -92,9 +94,9 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
         // Point to targeted clip/scene if requested in URL
         if (targetSceneIdParam || targetTime !== null) {
           const matched = fetchedScenes.find(
-            (s) =>
+            (s, idx) =>
               (targetSceneIdParam && s.id === targetSceneIdParam) ||
-              (targetTime !== null && targetTime >= s.startTime && targetTime <= s.endTime)
+              (targetTime !== null && targetTime >= s.startTime && (targetTime < s.endTime || idx === fetchedScenes.length - 1))
           );
           if (matched) {
             setActiveScene(matched);
@@ -166,8 +168,9 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
 
   // Sync active scene based on video currentTime (when not explicitly pinned)
   useEffect(() => {
+    if (isSeekingSceneRef.current) return;
     const matched = scenes.find(
-      (s) => currentTime >= s.startTime && currentTime <= s.endTime
+      (s, idx) => currentTime >= s.startTime && (currentTime < s.endTime || idx === scenes.length - 1)
     );
     if (matched && matched.id !== activeScene?.id) {
       setActiveScene(matched);
@@ -191,8 +194,15 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
 
   const handleSeekScene = (scene: VideoScene) => {
     setActiveScene(scene);
+    isSeekingSceneRef.current = true;
+    if (seekTimeoutRef.current) clearTimeout(seekTimeoutRef.current);
+    seekTimeoutRef.current = setTimeout(() => {
+      isSeekingSceneRef.current = false;
+    }, 600);
+
     if (playerRef.current) {
-      playerRef.current.seekTo(scene.startTime);
+      // Offset by +0.05s so HTML5 video keyframe snapping lands comfortably inside scene
+      playerRef.current.seekTo(scene.startTime + 0.05);
     }
   };
 
@@ -393,13 +403,15 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
             <span>Index Explorer</span>
           </Link>
 
-          <button
-            onClick={promptReindex}
-            className="p-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 hover:text-white transition-colors"
-            title="Force re-run AI indexing"
-          >
-            <RefreshCw className="w-4 h-4" />
-          </button>
+          {video.status !== 'processing' && video.status !== 'pending' && (
+            <button
+              onClick={promptReindex}
+              className="p-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 hover:text-white transition-colors"
+              title="Force re-run AI indexing"
+            >
+              <RefreshCw className="w-4 h-4" />
+            </button>
+          )}
 
           <button
             onClick={promptDeleteVideo}
@@ -539,15 +551,6 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
             </div>
             <div className="flex items-center space-x-3">
               <span className="font-mono text-amber-400 text-sm font-bold">{video.processingProgress}%</span>
-              <button
-                type="button"
-                onClick={promptReindex}
-                className="px-2.5 py-1 rounded-lg bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white border border-amber-500/40 text-xs font-semibold transition-colors flex items-center space-x-1 cursor-pointer"
-                title="Restart AI indexing pipeline (useful if stuck after server restart)"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>Reprocess</span>
-              </button>
               <button
                 type="button"
                 onClick={promptCancelProcessing}

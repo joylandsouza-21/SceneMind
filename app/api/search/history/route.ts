@@ -20,6 +20,7 @@ export async function GET(req: NextRequest) {
       }
       return {
         id: s.id,
+        name: s.name,
         query: s.query,
         groupId: s.groupId,
         groupName: s.groupName,

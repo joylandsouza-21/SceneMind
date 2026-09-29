@@ -79,7 +79,7 @@ export default function IndexExplorerPage({ params }: { params: { id: string } }
   const handleSelectScene = (scene: VideoScene) => {
     setSelectedScene(scene);
     if (playerRef.current) {
-      playerRef.current.seekTo(scene.startTime);
+      playerRef.current.seekTo(scene.startTime + 0.05);
     }
   };
 

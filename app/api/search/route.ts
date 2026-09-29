@@ -7,7 +7,7 @@ import { searchService, RerankedSceneResult } from '@/lib/services/search.servic
 
 export async function POST(req: NextRequest) {
   try {
-    const { query, autoVerify = true, limit = 15, groupId, videoId, forceLive = false } = await req.json();
+    const { query, autoVerify = true, limit = 15, groupId, videoId, forceLive = false, saveHistory = true } = await req.json();
 
     if (!query || typeof query !== 'string' || query.trim() === '') {
       return NextResponse.json({ error: 'Search query is required' }, { status: 400 });
@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Check if we already have cached results for this exact query, group, and video scope
-    if (!forceLive) {
+    if (!forceLive && saveHistory) {
       const cachedSearch = db.findCachedSearch(
         trimmedQuery,
         groupId && groupId !== 'all' ? groupId : undefined,
@@ -88,11 +88,13 @@ export async function POST(req: NextRequest) {
     const sceneSegmentMap = new Map<string, SceneSegmentMatch[]>();
     const sceneMatchMap = new Map<string, RerankedSceneResult>();
     let segmentSummaries: (PromptSegment & { matchedClipCount: number; matchedClipIds: string[] })[] = [];
+    const warnings: string[] = [];
 
     if (isMultiSegment) {
       const segmentResults = await Promise.all(
         rawSegments.map(async (seg: PromptSegment) => {
           const expansion = await searchService.expandQuery(seg.text);
+          if (expansion.warning) warnings.push(expansion.warning);
           const candidates = await searchService.retrieveCandidates({
             expansion,
             videoIdFilter,
@@ -104,6 +106,7 @@ export async function POST(req: NextRequest) {
                 query: seg.text,
                 candidates,
                 minConfidenceThreshold: 35,
+                onWarning: (w) => warnings.push(w),
               })
             : candidates.map((c) => ({
                 sceneId: c.sceneId,
@@ -163,6 +166,7 @@ export async function POST(req: NextRequest) {
     } else {
       // 1. Stage 1: AI Query Expansion (Synonyms, Visual Actions, & Entity Extraction)
       const expansion = await searchService.expandQuery(trimmedQuery);
+      if (expansion.warning) warnings.push(expansion.warning);
 
       // 2. Stage 2: Broad Hybrid Candidate Retrieval (Multi-Query Vector + Lexical Boost)
       const candidates = await searchService.retrieveCandidates({
@@ -177,6 +181,7 @@ export async function POST(req: NextRequest) {
             query: trimmedQuery,
             candidates,
             minConfidenceThreshold: 35,
+            onWarning: (w) => warnings.push(w),
           })
         : candidates.map((c) => ({
             sceneId: c.sceneId,
@@ -260,14 +265,20 @@ export async function POST(req: NextRequest) {
       isSegmented: isMultiSegment,
       createdAt: new Date().toISOString(),
     };
-    db.recordSearch(searchRecord);
+    if (saveHistory) {
+      db.recordSearch(searchRecord);
+    }
+
+    const uniqueWarnings = Array.from(new Set(warnings.filter(Boolean)));
 
     return NextResponse.json({
+      searchId: saveHistory ? searchRecord.id : undefined,
       query: trimmedQuery,
       count: results.length,
       results,
       segments: segmentSummaries,
       isSegmented: isMultiSegment,
+      warning: uniqueWarnings.length > 0 ? uniqueWarnings.join(' • ') : undefined,
     });
   } catch (err: any) {
     console.error('Global search error:', err);

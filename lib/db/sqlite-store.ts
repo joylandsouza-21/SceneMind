@@ -78,6 +78,7 @@ export class SqliteStore implements IStore {
 
       CREATE TABLE IF NOT EXISTS searches (
         id TEXT PRIMARY KEY,
+        name TEXT,
         video_id TEXT,
         group_id TEXT,
         group_name TEXT,
@@ -86,6 +87,7 @@ export class SqliteStore implements IStore {
         results TEXT DEFAULT '[]',
         segments TEXT DEFAULT '[]',
         is_segmented INTEGER DEFAULT 0,
+        part_saved_prompts TEXT DEFAULT '{}',
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_searches_created ON searches(created_at DESC);
@@ -121,10 +123,6 @@ export class SqliteStore implements IStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
-
-      try {
-        this.db.exec("ALTER TABLE jobs ADD COLUMN logs TEXT;");
-      } catch {}
 
       CREATE TABLE IF NOT EXISTS costs (
         id TEXT PRIMARY KEY,
@@ -166,6 +164,16 @@ export class SqliteStore implements IStore {
       );
       CREATE INDEX IF NOT EXISTS idx_ai_configs_task ON ai_configs(task_type);
     `);
+
+    try {
+      this.db.prepare('ALTER TABLE searches ADD COLUMN part_saved_prompts TEXT DEFAULT "{}"').run();
+    } catch {}
+    try {
+      this.db.prepare('ALTER TABLE searches ADD COLUMN name TEXT').run();
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE jobs ADD COLUMN logs TEXT;");
+    } catch {}
   }
 
   // --- Lifecycle (no-ops for SQLite, kept for interface compat) ---
@@ -319,45 +327,45 @@ export class SqliteStore implements IStore {
   }
 
   public recordSearch(search: VideoSearch): void {
-    const q = search.query.trim().toLowerCase();
-    const g = search.groupId || null;
-    const v = search.videoId || null;
-
-    // Check for existing with same query+scope
+    // Check for existing by unique search ID
     const existing = this.db.prepare(`
-      SELECT id FROM searches WHERE LOWER(TRIM(query)) = ? AND
-        (CASE WHEN ? IS NULL THEN group_id IS NULL ELSE group_id = ? END) AND
-        (CASE WHEN ? IS NULL THEN video_id IS NULL ELSE video_id = ? END)
+      SELECT id FROM searches WHERE id = ?
       LIMIT 1
-    `).get(q, g, g, v, v) as any;
+    `).get(search.id) as any;
 
     if (existing) {
       this.db.prepare(`
-        UPDATE searches SET query = @query, result_count = @resultCount, results = @results,
-          segments = @segments, is_segmented = @isSegmented, group_name = @groupName, created_at = @createdAt
+        UPDATE searches SET name = coalesce(@name, name), query = @query, result_count = @resultCount, results = @results,
+          segments = @segments, is_segmented = @isSegmented, group_name = @groupName,
+          part_saved_prompts = @partSavedPrompts, created_at = @createdAt
         WHERE id = @existingId
       `).run({
-        existingId: existing.id,
+        existingId: search.id,
+        name: search.name || null,
         query: search.query,
         resultCount: search.resultCount,
         results: JSON.stringify(search.results || []),
         segments: JSON.stringify(search.segments || []),
         isSegmented: search.isSegmented ? 1 : 0,
         groupName: search.groupName || null,
-        createdAt: new Date().toISOString(),
+        partSavedPrompts: JSON.stringify(search.partSavedPrompts || {}),
+        createdAt: search.createdAt || new Date().toISOString(),
       });
     } else {
       this.db.prepare(`
-        INSERT INTO searches (id, video_id, group_id, group_name, query, result_count, results, segments, is_segmented, created_at)
-        VALUES (@id, @videoId, @groupId, @groupName, @query, @resultCount, @results, @segments, @isSegmented, @createdAt)
+        INSERT INTO searches (id, name, video_id, group_id, group_name, query, result_count, results, segments, is_segmented, part_saved_prompts, created_at)
+        VALUES (@id, @name, @videoId, @groupId, @groupName, @query, @resultCount, @results, @segments, @isSegmented, @partSavedPrompts, @createdAt)
       `).run({
         ...search,
+        name: search.name || null,
         videoId: search.videoId || null,
         groupId: search.groupId || null,
         groupName: search.groupName || null,
         results: JSON.stringify(search.results || []),
         segments: JSON.stringify(search.segments || []),
         isSegmented: search.isSegmented ? 1 : 0,
+        partSavedPrompts: JSON.stringify(search.partSavedPrompts || {}),
+        createdAt: search.createdAt || new Date().toISOString(),
       });
     }
 
@@ -377,6 +385,31 @@ export class SqliteStore implements IStore {
   public getSearch(id: string): VideoSearch | undefined {
     const row = this.db.prepare('SELECT * FROM searches WHERE id = ?').get(id) as any;
     return row ? this.mapSearch(row) : undefined;
+  }
+
+  public updateSearchName(id: string, name: string): boolean {
+    try {
+      const trimmed = name.trim();
+      const res = this.db.prepare(`
+        UPDATE searches SET name = ? WHERE id = ?
+      `).run(trimmed || null, id);
+      return res.changes > 0;
+    } catch (e) {
+      console.error('Failed to update search name in SQLite:', e);
+      return false;
+    }
+  }
+
+  public updateSearchPartPrompts(id: string, partSavedPrompts: Record<string, any[]>): boolean {
+    try {
+      const res = this.db.prepare(`
+        UPDATE searches SET part_saved_prompts = ? WHERE id = ?
+      `).run(JSON.stringify(partSavedPrompts || {}), id);
+      return res.changes > 0;
+    } catch (e) {
+      console.error('Failed to update search part prompts in SQLite:', e);
+      return false;
+    }
   }
 
   public deleteSearch(id: string): boolean {
@@ -601,8 +634,16 @@ export class SqliteStore implements IStore {
   }
 
   private mapSearch(row: any): VideoSearch {
+    let partSavedPrompts: Record<string, any[]> = {};
+    try {
+      if (row.part_saved_prompts) {
+        partSavedPrompts = JSON.parse(row.part_saved_prompts);
+      }
+    } catch {}
+
     return {
       id: row.id,
+      name: row.name || undefined,
       videoId: row.video_id || undefined,
       groupId: row.group_id || undefined,
       groupName: row.group_name || undefined,
@@ -611,6 +652,7 @@ export class SqliteStore implements IStore {
       results: JSON.parse(row.results || '[]'),
       segments: JSON.parse(row.segments || '[]'),
       isSegmented: !!row.is_segmented,
+      partSavedPrompts,
       createdAt: row.created_at,
     };
   }

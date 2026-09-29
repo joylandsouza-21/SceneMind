@@ -14,12 +14,15 @@ import {
   ArrowRight,
   AlertCircle,
   CheckCircle2,
-  RefreshCw
+  RefreshCw,
+  Pencil,
+  Check
 } from 'lucide-react';
 import ConfirmModal from '@/components/ConfirmModal';
 
 export interface SearchHistoryItem {
   id: string;
+  name?: string;
   query: string;
   groupId?: string;
   groupName?: string;
@@ -36,6 +39,7 @@ interface SearchHistoryModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSelectSearch: (searchId: string, item?: SearchHistoryItem) => void;
+  onClearHistory?: () => void;
   currentSearchId?: string | null;
 }
 
@@ -43,12 +47,16 @@ export default function SearchHistoryModal({
   isOpen,
   onClose,
   onSelectSearch,
+  onClearHistory,
   currentSearchId,
 }: SearchHistoryModalProps) {
   const [history, setHistory] = useState<SearchHistoryItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [filterQuery, setFilterQuery] = useState('');
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editNameValue, setEditNameValue] = useState<string>('');
+  const [savingId, setSavingId] = useState<string | null>(null);
   const [confirmConfig, setConfirmConfig] = useState<{
     isOpen: boolean;
     title: string;
@@ -106,6 +114,12 @@ export default function SearchHistoryModal({
       const res = await fetch(`/api/search/history/${id}`, { method: 'DELETE' });
       if (res.ok) {
         setHistory((prev) => prev.filter((item) => item.id !== id));
+        if (currentSearchId === id) {
+          try {
+            localStorage.removeItem('scenemind_part_saved_prompts');
+          } catch {}
+          onClearHistory?.();
+        }
       }
     } catch (e) {
       console.error('Failed to delete search item:', e);
@@ -128,6 +142,10 @@ export default function SearchHistoryModal({
           const res = await fetch('/api/search/history', { method: 'DELETE' });
           if (res.ok) {
             setHistory([]);
+            try {
+              localStorage.removeItem('scenemind_part_saved_prompts');
+            } catch {}
+            onClearHistory?.();
           }
         } catch (e) {
           console.error('Failed to clear search history:', e);
@@ -137,10 +155,46 @@ export default function SearchHistoryModal({
     });
   };
 
+  const handleStartEdit = (e: React.MouseEvent, item: SearchHistoryItem) => {
+    e.stopPropagation();
+    setEditingId(item.id);
+    setEditNameValue(item.name || '');
+  };
+
+  const handleSaveName = async (e: React.MouseEvent | React.FormEvent, id: string) => {
+    e.stopPropagation();
+    if (e.preventDefault) e.preventDefault();
+    setSavingId(id);
+    const trimmed = editNameValue.trim();
+    try {
+      const res = await fetch(`/api/search/history/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      if (res.ok) {
+        setHistory((prev) =>
+          prev.map((item) => (item.id === id ? { ...item, name: trimmed || undefined } : item))
+        );
+        setEditingId(null);
+      }
+    } catch (err) {
+      console.error('Failed to rename search history item:', err);
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const handleCancelEdit = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditingId(null);
+  };
+
   const filteredHistory = history.filter((h) => {
     if (!filterQuery) return true;
     const q = filterQuery.toLowerCase();
     return (
+      (h.name && h.name.toLowerCase().includes(q)) ||
       h.query.toLowerCase().includes(q) ||
       (h.groupName && h.groupName.toLowerCase().includes(q)) ||
       (h.videoTitle && h.videoTitle.toLowerCase().includes(q))
@@ -310,12 +364,91 @@ export default function SearchHistoryModal({
                       )}
                     </div>
 
-                    <p className="text-xs font-medium text-slate-200 line-clamp-2 leading-relaxed group-hover:text-blue-300 transition-colors">
-                      "{item.query}"
-                    </p>
+                    {editingId === item.id ? (
+                      <div className="pt-1.5 space-y-2" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            autoFocus
+                            value={editNameValue}
+                            onChange={(e) => setEditNameValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                handleSaveName(e, item.id);
+                              } else if (e.key === 'Escape') {
+                                e.preventDefault();
+                                setEditingId(null);
+                              }
+                            }}
+                            placeholder="Enter custom conversation name / label..."
+                            className="flex-1 px-3 py-1.5 bg-slate-900 border border-blue-500/60 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={(e) => handleSaveName(e, item.id)}
+                            disabled={savingId === item.id}
+                            className="px-2.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1 shadow-sm transition-colors cursor-pointer disabled:opacity-50"
+                            title="Save custom name"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>{savingId === item.id ? 'Saving...' : 'Save'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleCancelEdit}
+                            className="p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                            title="Cancel"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        <p className="text-[11px] text-slate-500 flex items-center gap-1">
+                          <span>Prompt remains preserved:</span>
+                          <span className="text-slate-400 truncate max-w-sm">"{item.query}"</span>
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        {item.name ? (
+                          <>
+                            <div className="flex items-center gap-2">
+                              <h4 className="text-xs font-bold text-white group-hover:text-blue-300 transition-colors flex items-center gap-1.5">
+                                <Sparkles className="w-3 h-3 text-amber-400 shrink-0" />
+                                <span>{item.name}</span>
+                              </h4>
+                              <button
+                                type="button"
+                                onClick={(e) => handleStartEdit(e, item)}
+                                className="p-1 text-slate-500 hover:text-blue-300 hover:bg-slate-800/60 rounded transition-colors opacity-0 group-hover:opacity-100"
+                                title="Edit conversation name"
+                              >
+                                <Pencil className="w-3 h-3" />
+                              </button>
+                            </div>
+                            <p className="text-[11px] text-slate-400 line-clamp-2 leading-relaxed">
+                              <span className="text-slate-500 font-mono text-[10px] mr-1 uppercase tracking-wider">Prompt:</span>
+                              "{item.query}"
+                            </p>
+                          </>
+                        ) : (
+                          <p className="text-xs font-medium text-slate-200 line-clamp-2 leading-relaxed group-hover:text-blue-300 transition-colors">
+                            "{item.query}"
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-1 shrink-0 pt-1">
+                    <button
+                      type="button"
+                      onClick={(e) => handleStartEdit(e, item)}
+                      className="p-1.5 text-slate-500 hover:text-blue-400 hover:bg-slate-800/80 rounded-lg transition-colors opacity-60 group-hover:opacity-100"
+                      title={item.name ? "Edit name" : "Rename / label this conversation"}
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
                     <button
                       type="button"
                       onClick={(e) => handleDeleteItem(e, item.id)}

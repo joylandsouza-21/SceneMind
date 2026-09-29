@@ -62,7 +62,9 @@ export default function TimelineBar({
     if (onSeek) {
       onSeek(seekTime);
     }
-    const matched = scenes.find((s) => seekTime >= s.startTime && seekTime <= s.endTime);
+    const matched = scenes.find(
+      (s, idx) => seekTime >= s.startTime && (seekTime < s.endTime || idx === scenes.length - 1)
+    );
     if (matched) {
       onSelectScene(matched);
     }
@@ -71,7 +73,9 @@ export default function TimelineBar({
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     const time = getTimeFromEvent(e);
     setHoverTime(time);
-    const matched = scenes.find((s) => time >= s.startTime && time <= s.endTime);
+    const matched = scenes.find(
+      (s, idx) => time >= s.startTime && (time < s.endTime || idx === scenes.length - 1)
+    );
     setHoveredScene(matched || null);
 
     if (isDragging && onSeek) {

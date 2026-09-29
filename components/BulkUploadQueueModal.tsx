@@ -669,7 +669,7 @@ export default function BulkUploadQueueModal({
 
   const handleReprocessAllEligible = async () => {
     const eligible = queue.filter(
-      (q) => q.videoId && (q.status === 'processing' || q.status === 'failed' || q.status === 'cancelled')
+      (q) => q.videoId && (q.status === 'failed' || q.status === 'cancelled')
     );
     for (const item of eligible) {
       await handleReprocessQueueItem(item);
@@ -895,15 +895,15 @@ export default function BulkUploadQueueModal({
                     <span>Delete Queue</span>
                   </button>
 
-                  {queue.some((q) => q.videoId && (q.status === 'processing' || q.status === 'failed' || q.status === 'cancelled')) && (
+                  {queue.some((q) => q.videoId && (q.status === 'failed' || q.status === 'cancelled')) && (
                     <button
                       type="button"
                       onClick={handleReprocessAllEligible}
                       className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 hover:text-amber-200 border border-amber-500/30 text-xs font-semibold transition-all cursor-pointer"
-                      title="Restart all interrupted, failed, or processing items"
+                      title="Restart all interrupted or failed items"
                     >
                       <RotateCcw className="w-3 h-3 text-amber-400" />
-                      <span>Reprocess All</span>
+                      <span>Reprocess Failed</span>
                     </button>
                   )}
 
@@ -995,8 +995,8 @@ export default function BulkUploadQueueModal({
                         </span>
                       )}
 
-                      {/* Reprocess button for processing, failed, or cancelled videos */}
-                      {item.videoId && (item.status === 'processing' || item.status === 'failed' || item.status === 'cancelled') && (
+                      {/* Reprocess button only for failed or cancelled videos */}
+                      {item.videoId && (item.status === 'failed' || item.status === 'cancelled') && (
                         <button
                           type="button"
                           onClick={() => handleReprocessQueueItem(item)}

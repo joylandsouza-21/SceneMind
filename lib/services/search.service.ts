@@ -23,6 +23,7 @@ export interface QueryExpansionResult {
   keyEntities: string[];
   keyActions: string[];
   suggestedFocus?: string;
+  warning?: string;
 }
 
 export interface CandidateSceneWithScore extends VectorSearchResult {
@@ -54,6 +55,29 @@ export interface RerankedSceneResult {
   verificationReason: string;
   groupId?: string;
   groupName?: string;
+}
+
+async function withAiRetry<T>(fn: () => Promise<T>, maxRetries = 1, delayMs = 1200): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      attempt++;
+      const isTransient =
+        err?.message?.includes('503') ||
+        err?.message?.includes('429') ||
+        err?.message?.includes('high demand') ||
+        err?.message?.includes('Resource has been exhausted') ||
+        err?.message?.includes('Service Unavailable');
+      if (attempt <= maxRetries && isTransient) {
+        console.warn(`[AI_RETRY] Attempt ${attempt} hit transient error (${err.message}). Retrying in ${delayMs}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 export class SearchService {
@@ -105,7 +129,7 @@ Respond ONLY with valid JSON in this exact structure:
               temperature: 0.2,
             },
           });
-          const res = await model.generateContent(prompt);
+          const res = await withAiRetry(() => model.generateContent(prompt));
           textResult = res.response.text();
         } else if (config.provider === 'anthropic') {
           const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/v1/messages` : 'https://api.anthropic.com/v1/messages';
@@ -158,6 +182,9 @@ Respond ONLY with valid JSON in this exact structure:
         }
       } catch (err: any) {
         console.warn(`[SEARCH_EXPANSION] AI expansion fallback: ${err.message}`);
+        const fallback = this.fallbackQueryExpansion(trimmed);
+        fallback.warning = `AI expansion warning: ${err.message}`;
+        return fallback;
       }
     }
 
@@ -331,6 +358,7 @@ Respond ONLY with valid JSON in this exact structure:
     candidates: CandidateSceneWithScore[];
     videoId?: string;
     minConfidenceThreshold?: number;
+    onWarning?: (msg: string) => void;
   }): Promise<RerankedSceneResult[]> {
     const { query, candidates } = params;
     if (candidates.length === 0) return [];
@@ -389,7 +417,7 @@ Respond ONLY with valid JSON array of evaluations:
               temperature: 0.1,
             },
           });
-          const res = await model.generateContent(systemPrompt);
+          const res = await withAiRetry(() => model.generateContent(systemPrompt));
           textResult = res.response.text();
         } else if (config.provider === 'anthropic') {
           const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/v1/messages` : 'https://api.anthropic.com/v1/messages';
@@ -488,6 +516,9 @@ Respond ONLY with valid JSON array of evaluations:
         }
       } catch (err: any) {
         console.warn(`[SEARCH_RERANKER] AI re-ranking fallback: ${err.message}`);
+        if (params.onWarning) {
+          params.onWarning(`AI verification fallback: ${err.message}`);
+        }
       }
     }
 

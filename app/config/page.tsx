@@ -279,8 +279,8 @@ export default function ConfigPage() {
   }
 
   return (
-    <div className="min-h-screen pt-20 pb-16 bg-[#080c14] text-slate-200">
-      <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen pb-16 bg-[#080c14] text-slate-200">
+      <div className="w-full">
         {/* Page Header */}
         <div className="flex flex-col md:flex-row md:items-center justify-between py-6 border-b border-slate-800/80 mb-8 gap-4">
           <div>

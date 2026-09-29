@@ -63,3 +63,51 @@ export async function DELETE(
     return NextResponse.json({ error: err?.message || 'Internal error' }, { status: 500 });
   }
 }
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const resolvedParams = await Promise.resolve(params);
+    const searchId = resolvedParams?.id;
+    if (!searchId) {
+      return NextResponse.json({ error: 'Search ID is required' }, { status: 400 });
+    }
+
+    const body = await req.json();
+    const { name, partSavedPrompts } = body;
+    let updated = false;
+
+    if (name !== undefined) {
+      if (typeof db.updateSearchName === 'function') {
+        updated = db.updateSearchName(searchId, name) || updated;
+      } else {
+        const s = db.getSearch(searchId);
+        if (s) {
+          s.name = typeof name === 'string' ? (name.trim() || undefined) : undefined;
+          db.recordSearch(s);
+          updated = true;
+        }
+      }
+    }
+
+    if (partSavedPrompts !== undefined) {
+      if (typeof db.updateSearchPartPrompts === 'function') {
+        updated = db.updateSearchPartPrompts(searchId, partSavedPrompts || {}) || updated;
+      } else {
+        const s = db.getSearch(searchId);
+        if (s) {
+          s.partSavedPrompts = partSavedPrompts;
+          db.recordSearch(s);
+          updated = true;
+        }
+      }
+    }
+
+    return NextResponse.json({ success: updated });
+  } catch (err: any) {
+    console.error('Error updating search history record:', err);
+    return NextResponse.json({ error: err?.message || 'Internal error' }, { status: 500 });
+  }
+}

@@ -37,6 +37,8 @@ export interface IStore {
   recordSearch(search: VideoSearch): void;
   getSearches(videoId?: string): VideoSearch[];
   getSearch(id: string): VideoSearch | undefined;
+  updateSearchName(id: string, name: string): boolean;
+  updateSearchPartPrompts(id: string, partSavedPrompts: Record<string, any[]>): boolean;
   deleteSearch(id: string): boolean;
   clearSearches(): void;
 

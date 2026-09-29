@@ -267,28 +267,22 @@ export class PgStore implements IStore {
 
   public recordSearch(search: VideoSearch): void {
     const q = search.query.trim().toLowerCase();
-    const g = search.groupId || 'all';
-    const v = search.videoId || 'all';
-    const existingIdx = this.cache.searches.findIndex(s =>
-      s.query.trim().toLowerCase() === q && (s.groupId || 'all') === g && (s.videoId || 'all') === v
-    );
-
-    const now = new Date().toISOString();
+    const existingIdx = this.cache.searches.findIndex(s => s.id === search.id);
+    const now = search.createdAt || new Date().toISOString();
     if (existingIdx >= 0) {
       const existing = this.cache.searches[existingIdx];
-      const updated = { ...existing, ...search, id: existing.id || search.id, createdAt: now };
-      this.cache.searches.splice(existingIdx, 1);
-      this.cache.searches.unshift(updated);
+      const updated = { ...existing, ...search, id: search.id, createdAt: now };
+      this.cache.searches[existingIdx] = updated;
       this.exec(`
-        UPDATE searches SET query=$2, result_count=$3, results=$4, segments=$5, is_segmented=$6, group_name=$7, created_at=$8
+        UPDATE searches SET query=$2, result_count=$3, results=$4, segments=$5, is_segmented=$6, group_name=$7, part_saved_prompts=$8, created_at=$9
         WHERE id=$1
-      `, [updated.id, search.query, search.resultCount, JSON.stringify(search.results||[]), JSON.stringify(search.segments||[]), search.isSegmented ? true : false, search.groupName || null, now]);
+      `, [search.id, search.query, search.resultCount, JSON.stringify(search.results||[]), JSON.stringify(search.segments||[]), search.isSegmented ? true : false, search.groupName || null, JSON.stringify(search.partSavedPrompts||{}), now]);
     } else {
       this.cache.searches.unshift(search);
       this.exec(`
-        INSERT INTO searches (id, video_id, group_id, group_name, query, result_count, results, segments, is_segmented, created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-      `, [search.id, search.videoId || null, search.groupId || null, search.groupName || null, search.query, search.resultCount, JSON.stringify(search.results||[]), JSON.stringify(search.segments||[]), search.isSegmented ? true : false, search.createdAt]);
+        INSERT INTO searches (id, video_id, group_id, group_name, query, result_count, results, segments, is_segmented, part_saved_prompts, created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      `, [search.id, search.videoId || null, search.groupId || null, search.groupName || null, search.query, search.resultCount, JSON.stringify(search.results||[]), JSON.stringify(search.segments||[]), search.isSegmented ? true : false, JSON.stringify(search.partSavedPrompts||{}), search.createdAt]);
     }
 
     if (this.cache.searches.length > 500) {
@@ -303,6 +297,24 @@ export class PgStore implements IStore {
 
   public getSearch(id: string): VideoSearch | undefined {
     return this.cache.searches.find(s => s.id === id);
+  }
+
+  public updateSearchName(id: string, name: string): boolean {
+    const search = this.cache.searches.find(s => s.id === id);
+    if (search) {
+      search.name = name.trim() || undefined;
+    }
+    this.exec('UPDATE searches SET name = $2 WHERE id = $1', [id, name.trim() || null]);
+    return true;
+  }
+
+  public updateSearchPartPrompts(id: string, partSavedPrompts: Record<string, any[]>): boolean {
+    const search = this.cache.searches.find(s => s.id === id);
+    if (search) {
+      search.partSavedPrompts = partSavedPrompts;
+    }
+    this.exec('UPDATE searches SET part_saved_prompts = $2 WHERE id = $1', [id, JSON.stringify(partSavedPrompts || {})]);
+    return true;
   }
 
   public deleteSearch(id: string): boolean {
@@ -486,7 +498,7 @@ export class PgStore implements IStore {
 
   private mapSearch(row: any): VideoSearch {
     return {
-      id: row.id, videoId: row.video_id || undefined, groupId: row.group_id || undefined,
+      id: row.id, name: row.name || undefined, videoId: row.video_id || undefined, groupId: row.group_id || undefined,
       groupName: row.group_name || undefined, query: row.query, resultCount: row.result_count,
       results: typeof row.results === 'string' ? JSON.parse(row.results) : (row.results || []),
       segments: typeof row.segments === 'string' ? JSON.parse(row.segments) : (row.segments || []),

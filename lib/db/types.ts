@@ -47,6 +47,7 @@ export interface VideoScene {
 
 export interface VideoSearch {
   id: string;
+  name?: string;
   videoId?: string;
   groupId?: string;
   groupName?: string;
@@ -55,6 +56,7 @@ export interface VideoSearch {
   results?: any[];
   segments?: any[];
   isSegmented?: boolean;
+  partSavedPrompts?: Record<string, any[]>;
   createdAt: string;
 }
 

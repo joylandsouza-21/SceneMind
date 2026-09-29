@@ -1063,18 +1063,7 @@ export default function VideosPage() {
                           <span>Studio</span>
                         </Link>
 
-                        <button
-                          type="button"
-                          onClick={(e) => handleReprocessVideo(video.id, e)}
-                          disabled={reprocessingId === video.id}
-                          className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white text-xs font-semibold border border-amber-500/30 transition-all shadow-sm cursor-pointer"
-                          title="Restart AI indexing pipeline for this video (useful if stuck after server restart)"
-                        >
-                          <RotateCcw className={`w-3.5 h-3.5 ${reprocessingId === video.id ? 'animate-spin' : ''}`} />
-                          <span>Reprocess</span>
-                        </button>
-
-                        <span className="text-[11px] text-amber-400/80 italic flex items-center gap-1.5 font-medium">
+                        <span className="text-[11px] text-amber-400/80 italic flex items-center gap-1.5 font-medium px-2 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20">
                           <RefreshCw className="w-3 h-3 animate-spin" />
                           <span>Processing ({video.processingProgress}%)</span>
                         </span>

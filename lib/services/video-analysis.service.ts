@@ -30,6 +30,22 @@ export interface VideoAnalysisResult {
   rawResponse?: string;
 }
 
+export function parseTimestampToSeconds(val: any): number {
+  if (val === null || val === undefined) return 0;
+  if (typeof val === 'number') return Math.max(0, val);
+  const str = String(val).trim();
+  if (str.includes(':')) {
+    const parts = str.split(':').map((p) => parseFloat(p) || 0);
+    if (parts.length === 3) {
+      return Math.max(0, parts[0] * 3600 + parts[1] * 60 + parts[2]);
+    } else if (parts.length === 2) {
+      return Math.max(0, parts[0] * 60 + parts[1]);
+    }
+  }
+  const parsed = parseFloat(str);
+  return isNaN(parsed) ? 0 : Math.max(0, parsed);
+}
+
 export class VideoAnalysisService {
   /**
    * Stream large video files directly to Google Gemini File API via Resumable Upload
@@ -349,8 +365,9 @@ export class VideoAnalysisService {
 
       const validated: RawDetectedScene[] = [];
       for (const item of rawList) {
-        const startTime = Math.max(0, parseFloat(item.startTime ?? 0));
-        const endTime = Math.min(videoDuration || 999999, Math.max(startTime + 1, parseFloat(item.endTime ?? startTime + 10)));
+        const startTime = parseTimestampToSeconds(item.startTime ?? 0);
+        const rawEnd = parseTimestampToSeconds(item.endTime ?? startTime + 10);
+        const endTime = Math.min(videoDuration || 999999, Math.max(startTime + 1, rawEnd));
         validated.push({
           startTime,
           endTime,
@@ -371,14 +388,16 @@ export class VideoAnalysisService {
   }
 
   private recoverScenesFromMalformedText(text: string, duration: number): RawDetectedScene[] {
-    // Basic regex-based recovery for JSON structures
-    const sceneRegex = /"startTime"\s*:\s*([\d.]+)[^}]+"endTime"\s*:\s*([\d.]+)[^}]+"description"\s*:\s*"([^"]+)"/g;
+    // Basic regex-based recovery for JSON structures supporting numbers and timecode strings
+    const sceneRegex = /"startTime"\s*:\s*"?([^",\s}]+)"?[^}]+"endTime"\s*:\s*"?([^",\s}]+)"?[^}]+"description"\s*:\s*"([^"]+)"/g;
     const recovered: RawDetectedScene[] = [];
     let match;
     while ((match = sceneRegex.exec(text)) !== null) {
+      const startTime = parseTimestampToSeconds(match[1]);
+      const endTime = Math.max(startTime + 1, parseTimestampToSeconds(match[2]));
       recovered.push({
-        startTime: parseFloat(match[1]),
-        endTime: parseFloat(match[2]),
+        startTime,
+        endTime,
         description: match[3],
         actions: [],
         objects: [],

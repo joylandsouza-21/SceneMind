@@ -50,7 +50,11 @@ function createStore(): IStore {
 const globalForStore = globalThis as unknown as { __scenemind_db: IStore | undefined };
 
 function getDb(): IStore {
-  if (!globalForStore.__scenemind_db) {
+  if (
+    !globalForStore.__scenemind_db ||
+    typeof (globalForStore.__scenemind_db as any).updateSearchPartPrompts !== 'function' ||
+    typeof (globalForStore.__scenemind_db as any).updateSearchName !== 'function'
+  ) {
     globalForStore.__scenemind_db = createStore();
   }
   return globalForStore.__scenemind_db;
@@ -58,6 +62,11 @@ function getDb(): IStore {
 
 export const db: IStore = new Proxy({} as IStore, {
   get(_target, prop) {
-    return (getDb() as any)[prop];
+    const instance = getDb() as any;
+    const value = instance[prop];
+    if (typeof value === 'function') {
+      return value.bind(instance);
+    }
+    return value;
   },
 });
