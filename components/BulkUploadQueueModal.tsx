@@ -280,17 +280,21 @@ export default function BulkUploadQueueModal({
         throw new Error(data.error || 'Upload failed');
       }
 
+      const isFailed = data.video?.status === 'failed';
       setQueue((prev) =>
         prev.map((q) =>
           q.id === item.id
             ? {
                 ...q,
-                status: 'processing',
+                status: isFailed ? 'failed' : 'processing',
                 videoId: data.video?.id,
                 groupId: data.video?.groupId || q.groupId,
                 groupName: data.video?.groupName || q.groupName,
-                progress: 10,
-                stage: 'Analyzing metadata and queued for scene detection',
+                progress: isFailed ? 0 : 10,
+                stage: isFailed
+                  ? (data.video?.errorMessage || 'AI Analysis failed. Configure API key and reprocess.')
+                  : 'Analyzing metadata and queued for scene detection',
+                error: isFailed ? data.video?.errorMessage : undefined,
               }
             : q
         )
@@ -531,7 +535,7 @@ export default function BulkUploadQueueModal({
               ref={fileInputRef}
               type="file"
               multiple
-              accept="video/mp4,video/mkv,video/mov,video/webm,video/avi"
+              accept="video/*,.mp4,.mkv,.mov,.webm,.avi,.m4v,video/mp4,video/x-matroska,video/quicktime,video/webm,video/x-msvideo"
               className="hidden"
               onChange={(e) => handleFilesSelected(e.target.files)}
             />

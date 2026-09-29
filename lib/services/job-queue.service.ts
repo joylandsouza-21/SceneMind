@@ -24,6 +24,7 @@ export interface JobEventPayload {
 class JobQueueService extends EventEmitter {
   private activeJobs: Set<string> = new Set();
   private cancelledVideoIds: Set<string> = new Set();
+  private deletedVideoIds: Set<string> = new Set();
 
   constructor() {
     super();
@@ -47,6 +48,7 @@ class JobQueueService extends EventEmitter {
     if (videoId) {
       this.cancelledVideoIds.add(videoId);
       this.activeJobs.delete(videoId);
+      ffmpegService.killProcesses(videoId);
     }
 
     if (job) {
@@ -56,20 +58,56 @@ class JobQueueService extends EventEmitter {
       });
     }
 
-    if (videoId) {
+    if (videoId && !this.isDeleted(videoId)) {
       const video = db.getVideo(videoId);
       if (video && video.status !== 'indexed') {
         video.status = 'cancelled';
         video.errorMessage = 'Processing cancelled by user';
-        db.upsertVideo(video);
+        this.safeUpsertVideo(video);
       }
     }
 
     return true;
   }
 
+  public abortAndPurgeVideo(videoId: string): void {
+    console.log(`[JOB_QUEUE] Aborting and purging active pipeline for video: ${videoId}`);
+    this.deletedVideoIds.add(videoId);
+    this.cancelledVideoIds.add(videoId);
+    this.activeJobs.delete(videoId);
+
+    // 1. Terminate all active FFmpeg processes spawned for this video
+    ffmpegService.killProcesses(videoId);
+
+    // 2. Mark and delete any jobs associated with this video
+    const videoJobs = db.getJobs(videoId);
+    for (const job of videoJobs) {
+      this.emitEvent({
+        ...job,
+        status: 'cancelled',
+        currentStep: 'Processing aborted (video deleted)',
+      });
+      db.deleteJob(job.id);
+    }
+  }
+
   public isCancelled(videoId: string): boolean {
-    return this.cancelledVideoIds.has(videoId);
+    return this.cancelledVideoIds.has(videoId) || this.deletedVideoIds.has(videoId);
+  }
+
+  public isDeleted(videoId: string): boolean {
+    return this.deletedVideoIds.has(videoId);
+  }
+
+  public safeUpsertVideo(video: Video): void {
+    if (this.isCancelled(video.id) || this.isDeleted(video.id)) {
+      return;
+    }
+    // Verify video actually still exists in store (prevent resurrecting deleted videos)
+    if (!db.getVideo(video.id)) {
+      return;
+    }
+    db.upsertVideo(video);
   }
 
   public createJob(videoId: string, jobType: JobType, totalSteps = 100): ProcessingJob {
@@ -171,7 +209,8 @@ class JobQueueService extends EventEmitter {
       console.log(`[VIDEO_ANALYSIS] Starting pipeline for video: ${video.filename} (${video.id})`);
       video.status = 'processing';
       video.processingProgress = 5;
-      db.upsertVideo(video);
+      video.errorMessage = undefined;
+      this.safeUpsertVideo(video);
 
       this.appendJobLog(job.id, `🎬 Initializing processing pipeline for "${video.filename}"...`, {
         status: 'processing',
@@ -179,7 +218,7 @@ class JobQueueService extends EventEmitter {
         currentStep: 'Initializing video analysis pipeline',
       });
 
-      const absPath = storageService.getAbsolutePath(video.storagePath);
+      let currentAbsPath = storageService.getAbsolutePath(video.storagePath);
 
       // --- STEP 1: Codec Compatibility Check & Automatic Web-Transcoding ---
       this.appendJobLog(job.id, '🔍 [1/6] Inspecting video stream codecs & container compatibility (FFmpeg)...', {
@@ -187,48 +226,119 @@ class JobQueueService extends EventEmitter {
         currentStep: 'Inspecting video codecs',
       });
 
-      const codecCheck = await ffmpegService.inspectCodecCompatibility(absPath);
+      const codecCheck = await ffmpegService.inspectCodecCompatibility(currentAbsPath);
 
       if (!codecCheck.isWebReady) {
         const transcodeStartTime = Date.now();
-        this.appendJobLog(
-          job.id,
-          `⚠️ [1/6] Incompatible format detected: ${codecCheck.reason}. Converting to universal web format (H.264 8-bit / stereo AAC)...`,
-          {
-            progress: 10,
-            currentStep: 'Converting video to web-compatible H.264',
-          }
-        );
+        const webStoragePath = video.storagePath.replace(/\.[^/.]+$/, '') + '.mp4';
+        const webAbsPath = storageService.getAbsolutePath(webStoragePath);
+        const tempWebPath = webAbsPath + `.tmp_${Date.now()}.mp4`;
 
-        const tempWebPath = absPath.replace(/\.[^/.]+$/, '') + `_web_${Date.now()}.mp4`;
-
-        await ffmpegService.transcodeToWebH264(absPath, tempWebPath, (pct, statusMsg) => {
-          if (this.isCancelled(videoId)) return;
-          const overallPct = 10 + Math.round((pct / 100) * 15);
-          const liveMsg = `Converting video (${pct}%): ${statusMsg}`;
-          this.updateJob(job.id, {
-            progress: overallPct,
-            currentStep: liveMsg,
+        if (codecCheck.canFastRemux) {
+          this.appendJobLog(
+            job.id,
+            `⚡ [1/6] Codecs are already H.264/AAC. Fast-remuxing container from ${codecCheck.container || 'incompatible'} to web-streamable MP4...`,
+            {
+              progress: 15,
+              currentStep: 'Remuxing video to MP4 container',
+            }
+          );
+          await ffmpegService.remuxToWebMp4(currentAbsPath, tempWebPath, videoId);
+        } else if (codecCheck.canCopyVideo) {
+          this.appendJobLog(
+            job.id,
+            `⚡ [1/6] Video stream is already H.264 8-bit. Fast stream-copying video & converting audio to web AAC...`,
+            {
+              progress: 12,
+              currentStep: 'Stream copying video to web MP4',
+            }
+          );
+          await ffmpegService.transcodeToWebH264(currentAbsPath, tempWebPath, {
+            copyVideo: true,
+            abortKey: videoId,
+            onProgress: (pct, statusMsg) => {
+              if (this.isCancelled(videoId)) return;
+              const overallPct = 10 + Math.round((pct / 100) * 15);
+              const liveMsg = `Stream-copying video (${pct}%): ${statusMsg}`;
+              this.updateJob(job.id, {
+                progress: overallPct,
+                currentStep: liveMsg,
+              });
+              video.processingProgress = overallPct;
+              this.safeUpsertVideo(video);
+            },
           });
-          video.processingProgress = overallPct;
-          db.upsertVideo(video);
-        });
+        } else {
+          const encoder = await ffmpegService.getBestEncoder();
+          const hwLabel = encoder === 'nvenc' ? 'GPU (NVIDIA NVENC)'
+            : encoder === 'vaapi' ? 'GPU (Intel/AMD VAAPI)'
+            : encoder === 'qsv' ? 'GPU (Intel QuickSync)'
+            : 'CPU (libx264 ultrafast)';
 
-        if (this.isCancelled(videoId)) return;
+          this.appendJobLog(
+            job.id,
+            `⚠️ [1/6] Incompatible format detected: ${codecCheck.reason}. Converting using ${hwLabel}...`,
+            {
+              progress: 10,
+              currentStep: `Converting video (${hwLabel})`,
+            }
+          );
+
+          await ffmpegService.transcodeToWebH264(currentAbsPath, tempWebPath, {
+            copyVideo: false,
+            abortKey: videoId,
+            onProgress: (pct, statusMsg) => {
+              if (this.isCancelled(videoId)) return;
+              const overallPct = 10 + Math.round((pct / 100) * 15);
+              const liveMsg = `Converting video (${pct}%): ${statusMsg}`;
+              this.updateJob(job.id, {
+                progress: overallPct,
+                currentStep: liveMsg,
+              });
+              video.processingProgress = overallPct;
+              this.safeUpsertVideo(video);
+            },
+          });
+        }
+
+        if (this.isCancelled(videoId)) {
+          const fs = await import('fs');
+          if (fs.existsSync(tempWebPath)) {
+            try { fs.unlinkSync(tempWebPath); } catch {}
+          }
+          return;
+        }
 
         const transcodeElapsedSec = Math.round((Date.now() - transcodeStartTime) / 1000);
 
-        // Replace original file with the transcoded web version
+        // Replace / finalize the web-streamable MP4 file
         try {
           const fs = await import('fs');
-          if (fs.existsSync(absPath)) fs.unlinkSync(absPath);
-          fs.renameSync(tempWebPath, absPath);
+          if (fs.existsSync(webAbsPath)) fs.unlinkSync(webAbsPath);
+          fs.renameSync(tempWebPath, webAbsPath);
+
+          // Clean up original non-web file if it had a different path
+          if (currentAbsPath !== webAbsPath && fs.existsSync(currentAbsPath)) {
+            try {
+              fs.unlinkSync(currentAbsPath);
+            } catch (cleanupErr: any) {
+              console.warn(`[TRANSCODE] Original file cleanup: ${cleanupErr.message}`);
+            }
+          }
+
+          // Update database record with the new .mp4 storage path and filename
+          video.storagePath = webStoragePath;
+          video.filename = video.filename.replace(/\.[^/.]+$/, '') + '.mp4';
+          video.format = 'mp4';
+          this.safeUpsertVideo(video);
+          currentAbsPath = webAbsPath;
+
           this.appendJobLog(
             job.id,
-            `✅ [1/6] Transcode completed in ${transcodeElapsedSec}s! Video is now 100% web-compatible (H.264 8-bit, stereo AAC, faststart streaming enabled).`,
+            `✅ [1/6] Web conversion complete in ${transcodeElapsedSec}s! Video is 100% web-streamable MP4 (H.264 8-bit, stereo AAC, faststart streaming enabled).`,
             {
               progress: 25,
-              currentStep: 'Transcoding complete',
+              currentStep: 'Web conversion complete',
             }
           );
         } catch (replaceErr: any) {
@@ -253,14 +363,14 @@ class JobQueueService extends EventEmitter {
         currentStep: 'Extracting video metadata',
       });
 
-      const meta = await ffmpegService.getMetadata(absPath);
+      const meta = await ffmpegService.getMetadata(currentAbsPath);
       video.duration = meta.duration;
       video.width = meta.width;
       video.height = meta.height;
       video.fps = meta.fps;
       video.format = meta.format;
       video.sizeBytes = meta.sizeBytes;
-      db.upsertVideo(video);
+      this.safeUpsertVideo(video);
 
       this.appendJobLog(
         job.id,
@@ -272,7 +382,7 @@ class JobQueueService extends EventEmitter {
       try {
         const thumbName = `thumb_${video.id}.jpg`;
         const thumbPath = storageService.getAbsolutePath(`thumbnails/${thumbName}`);
-        await ffmpegService.extractThumbnail(absPath, Math.min(2, video.duration * 0.1), thumbPath);
+        await ffmpegService.extractThumbnail(currentAbsPath, Math.min(2, video.duration * 0.1), thumbPath);
         this.appendJobLog(job.id, '🖼️ [2/6] Generated poster thumbnail.', { progress: 32 });
       } catch (e) {
         console.warn('Initial thumbnail skipped:', e);
@@ -288,7 +398,7 @@ class JobQueueService extends EventEmitter {
 
       let scenes = db.getScenes(videoId);
       if (scenes.length === 0 || options?.forceReindex) {
-        const analysis = await videoAnalysisService.analyzeVideo(absPath, video.duration, {
+        const analysis = await videoAnalysisService.analyzeVideo(currentAbsPath, video.duration, {
           videoId,
           videoTitle: video.filename || video.originalName,
           minDuration: 6,
@@ -301,10 +411,12 @@ class JobQueueService extends EventEmitter {
             });
             if (pct) {
               video.processingProgress = pct;
-              db.upsertVideo(video);
+              this.safeUpsertVideo(video);
             }
           },
         });
+
+        if (this.isCancelled(videoId)) return;
 
         // Convert raw detected scenes to VideoScene records
         const newScenes: VideoScene[] = analysis.scenes.map((raw, idx) => ({
@@ -325,8 +437,10 @@ class JobQueueService extends EventEmitter {
           createdAt: new Date().toISOString(),
         }));
 
-        db.replaceScenesForVideo(videoId, newScenes);
-        scenes = newScenes;
+        if (!this.isCancelled(videoId)) {
+          db.replaceScenesForVideo(videoId, newScenes);
+          scenes = newScenes;
+        }
 
         this.appendJobLog(
           job.id,
@@ -413,7 +527,9 @@ class JobQueueService extends EventEmitter {
         });
 
         scene.embeddingId = vectorId;
-        db.upsertScene(scene);
+        if (!this.isCancelled(videoId)) {
+          db.upsertScene(scene);
+        }
 
         const currentPct = 65 + Math.round(((i + 1) / totalScenes) * 30);
 
@@ -434,7 +550,7 @@ class JobQueueService extends EventEmitter {
         }
 
         video.processingProgress = currentPct;
-        db.upsertVideo(video);
+        this.safeUpsertVideo(video);
       }
 
       if (this.isCancelled(videoId)) return;
@@ -448,7 +564,7 @@ class JobQueueService extends EventEmitter {
       video.status = 'indexed';
       video.processingProgress = 100;
       video.errorMessage = undefined;
-      db.upsertVideo(video);
+      this.safeUpsertVideo(video);
 
       this.appendJobLog(
         job.id,
@@ -462,24 +578,30 @@ class JobQueueService extends EventEmitter {
 
       console.log(`[INDEX_FINALIZATION] Completed successfully for video ${video.id}`);
     } catch (err: any) {
-      if (this.isCancelled(videoId)) {
-        console.log(`[JOB_QUEUE] Pipeline aborted for video ${videoId} due to user cancellation.`);
+      if (this.isCancelled(videoId) || this.isDeleted(videoId)) {
+        console.log(`[JOB_QUEUE] Pipeline aborted for video ${videoId} due to user cancellation or deletion.`);
         return;
       }
 
-      console.error(`[JOB_QUEUE] Pipeline failed for video ${videoId}:`, err);
-      video.status = 'failed';
-      video.errorMessage = err.message || 'Unknown processing error';
-      db.upsertVideo(video);
+      if (!this.isDeleted(videoId) && db.getVideo(videoId)) {
+        console.error(`[JOB_QUEUE] Pipeline failed for video ${videoId}:`, err);
+        video.status = 'failed';
+        video.errorMessage = err.message || 'Unknown processing error';
+        this.safeUpsertVideo(video);
 
-      this.appendJobLog(job.id, `❌ Processing failed: ${err.message}`, {
-        status: 'failed',
-        error: err.message,
-        currentStep: `Failed: ${err.message}`,
-      });
+        this.appendJobLog(job.id, `❌ Processing failed: ${err.message}`, {
+          status: 'failed',
+          error: err.message,
+          currentStep: `Failed: ${err.message}`,
+        });
+      }
     } finally {
       this.activeJobs.delete(videoId);
-      this.cancelledVideoIds.delete(videoId);
+      ffmpegService.killProcesses(videoId);
+      setTimeout(() => {
+        this.cancelledVideoIds.delete(videoId);
+        this.deletedVideoIds.delete(videoId);
+      }, 10000);
     }
   }
 

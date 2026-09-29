@@ -19,20 +19,127 @@ export interface VideoMetadata {
 
 export interface CodecInspectionResult {
   isWebReady: boolean;
+  canFastRemux: boolean;
+  canCopyVideo: boolean;
   videoCodec: string;
   pixFmt: string;
   audioCodec: string;
   audioChannels: number;
+  container: string;
   reason?: string;
 }
 
 export class FFmpegService {
   private ffmpegPath: string;
   private ffprobePath: string;
+  private cachedHwEncoder: 'nvenc' | 'vaapi' | 'qsv' | 'cpu' | null = null;
+  private activeProcesses: Map<string, Set<any>> = new Map();
 
   constructor() {
     this.ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
     this.ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
+  }
+
+  public registerProcess(key: string, child: any): void {
+    if (!this.activeProcesses.has(key)) {
+      this.activeProcesses.set(key, new Set());
+    }
+    const set = this.activeProcesses.get(key)!;
+    set.add(child);
+
+    const cleanup = () => {
+      set.delete(child);
+      if (set.size === 0) {
+        this.activeProcesses.delete(key);
+      }
+    };
+
+    child.once('close', cleanup);
+    child.once('exit', cleanup);
+    child.once('error', cleanup);
+  }
+
+  public unregisterProcess(key: string, child: any): void {
+    const set = this.activeProcesses.get(key);
+    if (set) {
+      set.delete(child);
+      if (set.size === 0) {
+        this.activeProcesses.delete(key);
+      }
+    }
+  }
+
+  public killProcesses(key: string): void {
+    const set = this.activeProcesses.get(key);
+    if (set && set.size > 0) {
+      console.log(`[FFMPEG] Terminating ${set.size} active child process(es) for key: ${key}`);
+      for (const child of set) {
+        try {
+          child.kill('SIGKILL');
+        } catch (e: any) {
+          console.warn(`[FFMPEG] Error terminating process: ${e.message}`);
+        }
+      }
+      this.activeProcesses.delete(key);
+    }
+  }
+
+  /**
+   * Automatically detect available GPU encoder (NVIDIA NVENC, Intel VAAPI, QuickSync)
+   * or fall back to high-performance multi-threaded CPU encoding.
+   */
+  public async getBestEncoder(): Promise<'nvenc' | 'vaapi' | 'qsv' | 'cpu'> {
+    if (this.cachedHwEncoder) return this.cachedHwEncoder;
+
+    // Check if user explicitly disabled GPU
+    if (process.env.USE_GPU === 'false' || process.env.FFMPEG_ENCODER === 'cpu') {
+      console.log('[FFMPEG] GPU disabled via config. Using multi-threaded CPU (libx264 ultrafast)');
+      this.cachedHwEncoder = 'cpu';
+      return 'cpu';
+    }
+
+    // 1. Test NVIDIA NVENC (GPU)
+    try {
+      await execFileAsync(this.ffmpegPath, [
+        '-y', '-f', 'lavfi', '-i', 'testsrc=d=0.1:s=64x64',
+        '-pix_fmt', 'yuv420p',
+        '-c:v', 'h264_nvenc', '-f', 'null', '-'
+      ]);
+      console.log('[FFMPEG] Hardware encoder detected: NVIDIA NVENC (GPU accelerated)');
+      this.cachedHwEncoder = 'nvenc';
+      return 'nvenc';
+    } catch (e: any) {}
+
+    // 2. Test VAAPI (Intel/AMD GPU render node)
+    if (fs.existsSync('/dev/dri/renderD128')) {
+      try {
+        await execFileAsync(this.ffmpegPath, [
+          '-y', '-vaapi_device', '/dev/dri/renderD128',
+          '-f', 'lavfi', '-i', 'testsrc=d=0.1:s=64x64',
+          '-vf', 'format=nv12,hwupload',
+          '-c:v', 'h264_vaapi', '-f', 'null', '-'
+        ]);
+        console.log('[FFMPEG] Hardware encoder detected: Intel/AMD VAAPI (GPU accelerated)');
+        this.cachedHwEncoder = 'vaapi';
+        return 'vaapi';
+      } catch (e: any) {}
+    }
+
+    // 3. Test Intel QuickSync (QSV)
+    try {
+      await execFileAsync(this.ffmpegPath, [
+        '-y', '-f', 'lavfi', '-i', 'testsrc=d=0.1:s=64x64',
+        '-pix_fmt', 'nv12',
+        '-c:v', 'h264_qsv', '-f', 'null', '-'
+      ]);
+      console.log('[FFMPEG] Hardware encoder detected: Intel QuickSync (GPU accelerated)');
+      this.cachedHwEncoder = 'qsv';
+      return 'qsv';
+    } catch (e: any) {}
+
+    console.log('[FFMPEG] GPU not available. Falling back to multi-threaded CPU (libx264 ultrafast)');
+    this.cachedHwEncoder = 'cpu';
+    return 'cpu';
   }
 
   public async inspectCodecCompatibility(filePath: string): Promise<CodecInspectionResult> {
@@ -51,6 +158,10 @@ export class FFmpegService {
       const { stdout } = await execFileAsync(this.ffprobePath, args);
       const data = JSON.parse(stdout);
       const streams = data.streams || [];
+      const format = data.format || {};
+      const formatName = (format.format_name || '').toLowerCase();
+      const ext = path.extname(filePath).toLowerCase();
+
       const videoStream = streams.find((s: any) => s.codec_type === 'video') || {};
       const audioStream = streams.find((s: any) => s.codec_type === 'audio') || {};
 
@@ -59,53 +170,123 @@ export class FFmpegService {
       const audioCodec = (audioStream.codec_name || '').toLowerCase();
       const audioChannels = parseInt(audioStream.channels || '2', 10);
 
-      // Check standard web playback criteria: H.264 / AVC1, 8-bit yuv420p, <= 2 audio channels
+      // Check standard web container criteria:
+      // Browser HTML5 <video> natively requires MP4 (or WebM) container with proper file extension.
+      const isMp4Container = (formatName.includes('mp4') || formatName.includes('mov,mp4') || formatName === 'mp4') && ext === '.mp4';
+      const isWebmContainer = formatName.includes('webm') && ext === '.webm';
+      const isWebContainer = isMp4Container || isWebmContainer;
+
+      // Check standard web playback video criteria: H.264 / AVC1, 8-bit yuv420p
       const isH264 = videoCodec === 'h264' || videoCodec === 'avc1';
-      const is8Bit = pixFmt === 'yuv420p' || pixFmt === 'yuvj420p' || pixFmt === 'rgb24' || !pixFmt.includes('10');
+      const is8BitYuv420 = pixFmt === 'yuv420p' || pixFmt === 'yuvj420p';
       const isStereoOrMono = audioChannels <= 2;
       const isStandardWebAudio = !audioCodec || audioCodec === 'aac' || audioCodec === 'mp3' || audioCodec === 'opus';
 
-      if (isH264 && is8Bit && isStereoOrMono && isStandardWebAudio) {
+      // Can copy video stream (zero re-encode time) if video is already H.264 8-bit
+      const canCopyVideo = isH264 && is8BitYuv420;
+
+      // Can fast-remux (lossless stream copy in seconds) if codecs are web-ready but container is not MP4
+      const canFastRemux = !isWebContainer && canCopyVideo && isStereoOrMono && isStandardWebAudio;
+
+      if (isWebContainer && isH264 && is8BitYuv420 && isStereoOrMono && isStandardWebAudio) {
         return {
           isWebReady: true,
+          canFastRemux: false,
+          canCopyVideo: true,
           videoCodec,
           pixFmt,
           audioCodec,
           audioChannels,
+          container: formatName,
         };
       }
 
       const issues: string[] = [];
+      if (!isWebContainer) issues.push(`Container format "${formatName}" (${ext}) is not web-streamable MP4`);
       if (!isH264) issues.push(`Video codec "${videoCodec}" is not H.264/AVC`);
-      if (!is8Bit) issues.push(`Color profile "${pixFmt}" (10-bit) unsupported by browsers`);
-      if (!isStereoOrMono) issues.push(`${audioChannels}-channel surround sound needs downmixing to stereo`);
+      if (!is8BitYuv420) issues.push(`Pixel format "${pixFmt}" is not standard 8-bit yuv420p`);
+      if (!isStereoOrMono) issues.push(`${audioChannels}-channel audio needs downmixing to stereo`);
       if (!isStandardWebAudio) issues.push(`Audio codec "${audioCodec}" requires AAC re-encoding`);
 
       return {
         isWebReady: false,
+        canFastRemux,
+        canCopyVideo,
         videoCodec,
         pixFmt,
         audioCodec,
         audioChannels,
+        container: formatName,
         reason: issues.join('; '),
       };
     } catch (err: any) {
       console.warn(`[FFMPEG] inspectCodecCompatibility fallback: ${err.message}`);
       return {
-        isWebReady: true,
+        isWebReady: false,
+        canFastRemux: false,
+        canCopyVideo: false,
         videoCodec: 'unknown',
         pixFmt: 'unknown',
         audioCodec: 'unknown',
         audioChannels: 2,
+        container: 'unknown',
+        reason: err.message,
       };
     }
+  }
+
+  public async remuxToWebMp4(inputVideoPath: string, outputVideoPath: string, abortKey?: string): Promise<string> {
+    const dir = path.dirname(outputVideoPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    const args = [
+      '-i', inputVideoPath,
+      '-c', 'copy',
+      '-movflags', '+faststart',
+      '-y',
+      outputVideoPath,
+    ];
+
+    return new Promise((resolve, reject) => {
+      const child = spawn(this.ffmpegPath, args);
+      if (abortKey) {
+        this.registerProcess(abortKey, child);
+      }
+      let stderrAccum = '';
+      child.stderr.on('data', (d) => {
+        stderrAccum += d.toString();
+      });
+      child.on('close', (code) => {
+        if (code === 0 && fs.existsSync(outputVideoPath)) {
+          resolve(outputVideoPath);
+        } else {
+          if (fs.existsSync(outputVideoPath)) {
+            try { fs.unlinkSync(outputVideoPath); } catch {}
+          }
+          reject(new Error(`FFmpeg remux failed with code ${code}: ${stderrAccum.slice(-300)}`));
+        }
+      });
+      child.on('error', reject);
+    });
   }
 
   public async transcodeToWebH264(
     inputVideoPath: string,
     outputVideoPath: string,
-    onProgress?: (pct: number, statusMsg: string) => void
+    optionsOrProgress?:
+      | {
+          copyVideo?: boolean;
+          onProgress?: (pct: number, statusMsg: string) => void;
+          abortKey?: string;
+        }
+      | ((pct: number, statusMsg: string) => void)
   ): Promise<string> {
+    const options = typeof optionsOrProgress === 'function'
+      ? { onProgress: optionsOrProgress }
+      : (optionsOrProgress || {});
+
     const dir = path.dirname(outputVideoPath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -114,13 +295,106 @@ export class FFmpegService {
     const meta = await this.getMetadata(inputVideoPath).catch(() => ({ duration: 60 }));
     const totalDuration = Math.max(1, meta.duration || 60);
 
-    return new Promise((resolve, reject) => {
-      const args = [
+    // If video stream is already H.264 8-bit, do a stream copy of the video (takes 2-3s!)
+    if (options.copyVideo) {
+      return new Promise((resolve, reject) => {
+        const args = [
+          '-i', inputVideoPath,
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-ac', '2',
+          '-b:a', '192k',
+          '-movflags', '+faststart',
+          '-y',
+          outputVideoPath,
+        ];
+
+        const child = spawn(this.ffmpegPath, args);
+        if (options.abortKey) {
+          this.registerProcess(options.abortKey, child);
+        }
+        let stderrAccum = '';
+
+        child.stderr.on('data', (d) => {
+          stderrAccum += d.toString();
+          if (options.onProgress) options.onProgress(50, 'Copying video stream (instant)...');
+        });
+
+        child.on('close', (code) => {
+          if (code === 0 && fs.existsSync(outputVideoPath)) {
+            if (options.onProgress) options.onProgress(100, 'Stream copy complete (100%)');
+            resolve(outputVideoPath);
+          } else {
+            if (fs.existsSync(outputVideoPath)) {
+              try { fs.unlinkSync(outputVideoPath); } catch {}
+            }
+            reject(new Error(`FFmpeg stream copy failed with code ${code}: ${stderrAccum.slice(-500)}`));
+          }
+        });
+
+        child.on('error', reject);
+      });
+    }
+
+    // Determine whether to use GPU or CPU
+    const encoder = await this.getBestEncoder();
+
+    const buildArgs = (enc: 'nvenc' | 'vaapi' | 'qsv' | 'cpu'): string[] => {
+      if (enc === 'nvenc') {
+        return [
+          '-i', inputVideoPath,
+          '-c:v', 'h264_nvenc',
+          '-preset', 'p4',
+          '-cq', '23',
+          '-pix_fmt', 'yuv420p',
+          '-c:a', 'aac',
+          '-ac', '2',
+          '-b:a', '192k',
+          '-movflags', '+faststart',
+          '-y',
+          outputVideoPath,
+        ];
+      }
+
+      if (enc === 'vaapi') {
+        return [
+          '-vaapi_device', '/dev/dri/renderD128',
+          '-i', inputVideoPath,
+          '-vf', 'format=nv12,hwupload',
+          '-c:v', 'h264_vaapi',
+          '-qp', '23',
+          '-c:a', 'aac',
+          '-ac', '2',
+          '-b:a', '192k',
+          '-movflags', '+faststart',
+          '-y',
+          outputVideoPath,
+        ];
+      }
+
+      if (enc === 'qsv') {
+        return [
+          '-i', inputVideoPath,
+          '-c:v', 'h264_qsv',
+          '-preset', 'veryfast',
+          '-global_quality', '23',
+          '-c:a', 'aac',
+          '-ac', '2',
+          '-b:a', '192k',
+          '-movflags', '+faststart',
+          '-y',
+          outputVideoPath,
+        ];
+      }
+
+      // Default: Multi-threaded CPU ultrafast
+      return [
         '-i', inputVideoPath,
         '-c:v', 'libx264',
-        '-preset', 'veryfast',
+        '-preset', 'ultrafast',
         '-crf', '22',
         '-pix_fmt', 'yuv420p',
+        '-threads', '0',
         '-c:a', 'aac',
         '-ac', '2',
         '-b:a', '192k',
@@ -128,39 +402,65 @@ export class FFmpegService {
         '-y',
         outputVideoPath,
       ];
+    };
 
-      const child = spawn(this.ffmpegPath, args);
-      let stderrAccum = '';
-
-      child.stderr.on('data', (data) => {
-        const text = data.toString();
-        stderrAccum += text;
-        const timeMatch = text.match(/time=(\d+):(\d+):(\d+\.\d+)/);
-        if (timeMatch && onProgress) {
-          const hours = parseInt(timeMatch[1], 10);
-          const minutes = parseInt(timeMatch[2], 10);
-          const seconds = parseFloat(timeMatch[3]);
-          const currentSecs = hours * 3600 + minutes * 60 + seconds;
-          const pct = Math.min(99, Math.max(1, Math.round((currentSecs / totalDuration) * 100)));
-          const fpsMatch = text.match(/fps=\s*(\d+)/);
-          const fpsText = fpsMatch ? ` @ ${fpsMatch[1]} fps` : '';
-          onProgress(pct, `Transcoding video (${pct}%${fpsText})...`);
+    const runSpawn = (args: string[], encoderLabel: string): Promise<string> => {
+      return new Promise((resolve, reject) => {
+        const child = spawn(this.ffmpegPath, args);
+        if (options.abortKey) {
+          this.registerProcess(options.abortKey, child);
         }
-      });
+        let stderrAccum = '';
 
-      child.on('close', (code) => {
-        if (code === 0 && fs.existsSync(outputVideoPath)) {
-          if (onProgress) onProgress(100, 'Transcode complete (100%)');
-          resolve(outputVideoPath);
-        } else {
-          reject(new Error(`FFmpeg transcode failed with code ${code}: ${stderrAccum.slice(-500)}`));
-        }
-      });
+        child.stderr.on('data', (data) => {
+          const text = data.toString();
+          stderrAccum += text;
+          const timeMatch = text.match(/time=(\d+):(\d+):(\d+\.\d+)/);
+          if (timeMatch && options?.onProgress) {
+            const hours = parseInt(timeMatch[1], 10);
+            const minutes = parseInt(timeMatch[2], 10);
+            const seconds = parseFloat(timeMatch[3]);
+            const currentSecs = hours * 3600 + minutes * 60 + seconds;
+            const pct = Math.min(99, Math.max(1, Math.round((currentSecs / totalDuration) * 100)));
+            const fpsMatch = text.match(/fps=\s*(\d+)/);
+            const fpsText = fpsMatch ? ` @ ${fpsMatch[1]} fps` : '';
+            const speedMatch = text.match(/speed=\s*([\d.]+x)/);
+            const speedText = speedMatch ? ` (${speedMatch[1]})` : '';
+            options.onProgress(pct, `Converting (${encoderLabel} ${pct}%${fpsText}${speedText})...`);
+          }
+        });
 
-      child.on('error', (err) => {
-        reject(err);
+        child.on('close', (code) => {
+          if (code === 0 && fs.existsSync(outputVideoPath)) {
+            if (options?.onProgress) options.onProgress(100, `Conversion complete via ${encoderLabel} (100%)`);
+            resolve(outputVideoPath);
+          } else {
+            if (fs.existsSync(outputVideoPath)) {
+              try { fs.unlinkSync(outputVideoPath); } catch {}
+            }
+            reject(new Error(`FFmpeg transcode failed (${encoderLabel}, code ${code}): ${stderrAccum.slice(-500)}`));
+          }
+        });
+
+        child.on('error', (err) => {
+          reject(err);
+        });
       });
-    });
+    };
+
+    // Try GPU encoder first if available; fall back to CPU if GPU execution fails
+    try {
+      const label = encoder === 'nvenc' ? 'GPU NVENC' : encoder === 'vaapi' ? 'GPU VAAPI' : encoder === 'qsv' ? 'GPU QSV' : 'CPU';
+      return await runSpawn(buildArgs(encoder), label);
+    } catch (gpuErr: any) {
+      if (encoder !== 'cpu') {
+        console.warn(`[FFMPEG] GPU encoder (${encoder}) failed at runtime (${gpuErr.message}). Falling back to CPU ultrafast...`);
+        this.cachedHwEncoder = 'cpu';
+        if (options?.onProgress) options.onProgress(1, 'GPU failed, falling back to CPU ultrafast...');
+        return await runSpawn(buildArgs('cpu'), 'CPU (fallback)');
+      }
+      throw gpuErr;
+    }
   }
 
   public async getMetadata(filePath: string): Promise<VideoMetadata> {

@@ -101,6 +101,14 @@ export async function GET(
       contentType = 'image/png';
     } else if (relativeKey.endsWith('.webp')) {
       contentType = 'image/webp';
+    } else if (relativeKey.endsWith('.webm')) {
+      contentType = 'video/webm';
+    } else if (relativeKey.endsWith('.mkv')) {
+      contentType = 'video/x-matroska';
+    } else if (relativeKey.endsWith('.mov')) {
+      contentType = 'video/quicktime';
+    } else if (relativeKey.endsWith('.avi')) {
+      contentType = 'video/x-msvideo';
     }
 
     // Handle HTTP 206 Partial Content for video seeking

@@ -317,6 +317,8 @@ export default function ScenePreviewModal({
 
   const videoSrc = scene.videoStoragePath
     ? `/api/media/${scene.videoStoragePath}`
+    : scene.storagePath
+    ? `/api/media/${scene.storagePath}`
     : `/api/media/videos/${scene.videoId}.mp4`;
 
   return (

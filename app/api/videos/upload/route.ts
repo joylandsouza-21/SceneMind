@@ -197,27 +197,16 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Run the indexing pipeline synchronously so we can roll back on failure
+    // Run the indexing pipeline synchronously if requested
     if (autoIndex) {
       try {
         await jobQueueService.processVideoPipeline(videoId);
-
-        // Confirm it finished successfully
-        const finalVideo = db.getVideo(videoId);
-        if (finalVideo?.status === 'failed') {
-          await storageService.deleteFile(storageKey);
-          db.deleteVideo(videoId);
-          const errMsg = finalVideo.errorMessage || 'AI analysis failed. Check your Gemini API key or try again later.';
-          return NextResponse.json({ error: errMsg }, { status: 500 });
-        }
       } catch (pipelineErr: any) {
-        await storageService.deleteFile(storageKey).catch(() => {});
-        db.deleteVideo(videoId);
-        console.error(`[UPLOAD] Pipeline failed for ${videoId}:`, pipelineErr);
-        return NextResponse.json(
-          { error: pipelineErr.message || 'Video processing failed. Please try again.' },
-          { status: 500 }
-        );
+        console.error(`[UPLOAD] Pipeline error for ${videoId}:`, pipelineErr);
+        const currentVideo = db.getVideo(videoId) || video;
+        currentVideo.status = 'failed';
+        currentVideo.errorMessage = pipelineErr.message || 'Video processing failed.';
+        db.upsertVideo(currentVideo);
       }
     }
 
@@ -225,7 +214,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       video: finalVideo,
-      message: 'Video uploaded and indexed successfully.',
+      message:
+        finalVideo.status === 'failed'
+          ? `Video uploaded but AI processing failed: ${finalVideo.errorMessage}. You can reprocess it anytime.`
+          : 'Video uploaded and indexed successfully.',
     });
   } catch (err: any) {
     if (uploadedKey) {

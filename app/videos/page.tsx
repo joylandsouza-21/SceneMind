@@ -20,7 +20,9 @@ import {
   Plus,
   Square,
   Tag,
-  ShieldCheck
+  ShieldCheck,
+  RotateCcw,
+  Sliders
 } from 'lucide-react';
 import { formatTime } from '@/components/VideoPlayer';
 import BulkUploadQueueModal from '@/components/BulkUploadQueueModal';
@@ -47,7 +49,32 @@ export default function VideosPage() {
   const [activeJobsCount, setActiveJobsCount] = useState(0);
   const [isCreatingGroupInline, setIsCreatingGroupInline] = useState(false);
   const [inlineGroupName, setInlineGroupName] = useState('');
+  const [reprocessingId, setReprocessingId] = useState<string | null>(null);
+  const [deletingVideoId, setDeletingVideoId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleReprocessVideo = async (videoId: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setReprocessingId(videoId);
+    try {
+      const res = await fetch(`/api/videos/${videoId}/reindex`, { method: 'POST' });
+      if (res.ok) {
+        setVideos((prev) =>
+          prev.map((v) =>
+            v.id === videoId
+              ? { ...v, status: 'processing', processingProgress: 5, errorMessage: undefined }
+              : v
+          )
+        );
+        fetchJobs();
+      }
+    } catch (err) {
+      console.error('Reprocess error:', err);
+    } finally {
+      setReprocessingId(null);
+    }
+  };
 
   const fetchVideos = async () => {
     try {
@@ -275,14 +302,23 @@ export default function VideosPage() {
       return;
     }
 
+    setDeletingVideoId(videoId);
+    // Optimistically remove from state immediately
+    setVideos((prev) => prev.filter((v) => v.id !== videoId));
+    setJobs((prev) => prev.filter((j) => j.videoId !== videoId));
+
     try {
       const res = await fetch(`/api/videos/${videoId}`, { method: 'DELETE' });
-      if (res.ok) {
-        setVideos((prev) => prev.filter((v) => v.id !== videoId));
+      if (!res.ok) {
+        refreshAll();
+      } else {
         fetchGroups();
       }
     } catch (e) {
       console.error('Delete error:', e);
+      refreshAll();
+    } finally {
+      setDeletingVideoId(null);
     }
   };
 
@@ -361,7 +397,7 @@ export default function VideosPage() {
           <input
             ref={fileInputRef}
             type="file"
-            accept="video/mp4,video/mkv,video/mov,video/webm,video/avi"
+            accept="video/*,.mp4,.mkv,.mov,.webm,.avi,.m4v,video/mp4,video/x-matroska,video/quicktime,video/webm,video/x-msvideo"
             className="hidden"
             onChange={(e) => {
               if (e.target.files && e.target.files[0]) {
@@ -773,11 +809,11 @@ export default function VideosPage() {
               >
                 <div>
                   {/* Thumbnail / Header */}
-                  <div className="relative aspect-video bg-slate-950 overflow-hidden">
+                  <Link href={`/videos/${video.id}`} className="block relative aspect-video bg-slate-950 overflow-hidden group/thumb cursor-pointer">
                     <img
                       src={`/api/media/thumbnails/thumb_${video.id}.jpg`}
                       alt={video.filename}
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                      className="w-full h-full object-cover group-hover/thumb:scale-105 transition-transform duration-300"
                       onError={(e) => {
                         (e.target as HTMLImageElement).style.display = 'none';
                       }}
@@ -813,13 +849,15 @@ export default function VideosPage() {
                     <div className="absolute bottom-3 right-3 px-2 py-0.5 rounded bg-black/80 text-xs font-mono text-slate-200 backdrop-blur-sm">
                       {formatTime(video.duration)}
                     </div>
-                  </div>
+                  </Link>
 
                   {/* Body Info */}
                   <div className="p-5 space-y-3">
-                    <h3 className="font-semibold text-white text-base line-clamp-1 group-hover:text-blue-400 transition-colors">
-                      {video.filename}
-                    </h3>
+                    <Link href={`/videos/${video.id}`} className="block">
+                      <h3 className="font-semibold text-white text-base line-clamp-1 hover:text-blue-400 transition-colors">
+                        {video.filename}
+                      </h3>
+                    </Link>
 
                     <div className="grid grid-cols-2 gap-2 text-xs text-slate-400">
                       <div className="flex items-center space-x-1.5">
@@ -911,24 +949,66 @@ export default function VideosPage() {
                       </>
                     )}
                     {(video.status === 'processing' || video.status === 'pending') && (
-                      <span className="text-[11px] text-amber-400/80 italic flex items-center gap-1.5">
-                        <RefreshCw className="w-3 h-3 animate-spin" />
-                        Processing — actions available after indexing
-                      </span>
+                      <div className="flex items-center space-x-2">
+                        <Link
+                          href={`/videos/${video.id}`}
+                          className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white text-xs font-semibold border border-amber-500/30 transition-all shadow-sm group/btn"
+                          title="Open Studio to view live processing details, terminal logs, and video"
+                        >
+                          <Play className="w-3.5 h-3.5 fill-current group-hover/btn:scale-110 transition-transform" />
+                          <span>Studio</span>
+                        </Link>
+
+                        <span className="text-[11px] text-amber-400/80 italic flex items-center gap-1.5 font-medium">
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                          <span>Processing ({video.processingProgress}%)</span>
+                        </span>
+                      </div>
                     )}
                     {(video.status === 'failed' || video.status === 'cancelled') && (
-                      <span className="text-[11px] text-slate-400 italic">
-                        {video.status === 'cancelled' ? 'Indexing halted' : 'Delete and re-upload'}
-                      </span>
+                      <div className="flex items-center space-x-2">
+                        <button
+                          type="button"
+                          onClick={(e) => handleReprocessVideo(video.id, e)}
+                          disabled={reprocessingId === video.id}
+                          className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white text-xs font-semibold border border-amber-500/30 transition-all shadow-sm"
+                          title="Re-add this video to the AI processing queue"
+                        >
+                          <RotateCcw className={`w-3.5 h-3.5 ${reprocessingId === video.id ? 'animate-spin' : ''}`} />
+                          <span>{reprocessingId === video.id ? 'Queuing...' : 'Reprocess Video'}</span>
+                        </button>
+
+                        <Link
+                          href="/config"
+                          className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-medium border border-slate-700 transition-colors"
+                          title="Open AI Config to configure Gemini API Key"
+                        >
+                          <Sliders className="w-3 h-3 text-indigo-400" />
+                          <span>AI Config</span>
+                        </Link>
+
+                        <Link
+                          href={`/videos/${video.id}`}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                          title="Open Studio"
+                        >
+                          <Play className="w-3.5 h-3.5" />
+                        </Link>
+                      </div>
                     )}
                   </div>
 
                   <button
                     onClick={(e) => handleDeleteVideo(video.id, e)}
-                    className="p-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                    title="Delete video"
+                    disabled={deletingVideoId === video.id}
+                    className="p-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                    title={deletingVideoId === video.id ? 'Deleting video...' : 'Delete video'}
                   >
-                    <Trash2 className="w-4 h-4" />
+                    {deletingVideoId === video.id ? (
+                      <RefreshCw className="w-4 h-4 animate-spin text-red-400" />
+                    ) : (
+                      <Trash2 className="w-4 h-4" />
+                    )}
                   </button>
                 </div>
               </div>

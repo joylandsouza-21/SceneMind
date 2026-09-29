@@ -132,14 +132,10 @@ export class VideoAnalysisService {
       return result;
     }
 
-    // No API key — Keyless / Demo mode: use the intelligent simulator
-    if (options?.onProgress) {
-      options.onProgress('No Gemini API key configured. Generating intelligent scene breakdown via local semantic engine...', 35);
-    }
-    console.info('[VIDEO_ANALYSIS] No Gemini API key configured. Running in demo/simulator mode.');
-    const result = this.simulateIntelligentSceneSegmentation(durationSeconds, minDur, maxDur, options?.videoId);
-    result.latencyMs = Date.now() - startTime;
-    return result;
+    // No API key configured in AI Config — fail gracefully with instructions to reprocess
+    throw new Error(
+      'Gemini API key is not configured in AI Config. Please add your Gemini API key in AI Config, then click "Reprocess Video".'
+    );
   }
 
   private async executeGeminiVideoAnalysis(
