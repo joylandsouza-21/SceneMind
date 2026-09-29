@@ -426,8 +426,16 @@ function GlobalSearchContent() {
 
   // Filtered results based on selected segment (capped to top 5 matches per part)
   const displayedResults = useMemo(() => {
-    if (selectedSegmentId === 'all') return results;
-    return results.filter((r) => r.matchedSegmentIds?.includes(selectedSegmentId)).slice(0, 5);
+    const list = selectedSegmentId === 'all'
+      ? results
+      : results.filter((r) => r.matchedSegmentIds?.includes(selectedSegmentId)).slice(0, 5);
+
+    // Strictly sort by highest match percentage on top
+    return [...list].sort((a, b) => {
+      const scoreA = typeof a.confidenceScore === 'number' ? a.confidenceScore : (a.similarityScore ?? 0);
+      const scoreB = typeof b.confidenceScore === 'number' ? b.confidenceScore : (b.similarityScore ?? 0);
+      return scoreB - scoreA;
+    });
   }, [results, selectedSegmentId]);
 
   return (
@@ -1102,7 +1110,7 @@ function GlobalSearchContent() {
 
                       <div className="text-right shrink-0">
                         <span className="px-2 py-0.5 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-xs font-semibold block">
-                          Match: {res.similarityScore}%
+                          Match: {typeof res.confidenceScore === 'number' ? res.confidenceScore : res.similarityScore}%
                         </span>
                         {res.isVerified && (
                           <span className="text-[10px] text-emerald-400 font-semibold mt-1 block">

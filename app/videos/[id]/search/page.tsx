@@ -83,10 +83,15 @@ export default function VideoSemanticSearchPage({ params }: { params: { id: stri
 
       const data = await res.json();
       if (res.ok) {
-        setResults(data.results || []);
+        const sorted = (data.results || []).sort((a: any, b: any) => {
+          const scoreA = typeof a.confidenceScore === 'number' ? a.confidenceScore : (a.similarityScore ?? 0);
+          const scoreB = typeof b.confidenceScore === 'number' ? b.confidenceScore : (b.similarityScore ?? 0);
+          return scoreB - scoreA;
+        });
+        setResults(sorted);
         // Automatically seek player to top match if available
-        if (data.results && data.results.length > 0) {
-          const top = data.results[0];
+        if (sorted && sorted.length > 0) {
+          const top = sorted[0];
           seekToResult(top);
         }
       }
@@ -262,12 +267,12 @@ export default function VideoSemanticSearchPage({ params }: { params: { id: stri
                         </div>
                         <div className="flex items-center space-x-2 mt-1">
                           <span className="px-2 py-0.5 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-xs font-semibold">
-                            Similarity: {res.similarityScore}%
+                            Match: {typeof res.confidenceScore === 'number' ? res.confidenceScore : res.similarityScore}%
                           </span>
                           {res.isVerified && (
                             <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold flex items-center space-x-1">
                               <ShieldCheck className="w-3 h-3" />
-                              <span>AI Verified ({res.confidenceScore}%)</span>
+                              <span>AI Verified</span>
                             </span>
                           )}
                         </div>

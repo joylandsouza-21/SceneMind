@@ -243,10 +243,10 @@ export class TimestampVerificationService {
       const data = JSON.parse(clean.trim());
 
       const match = Boolean(data.match);
-      const startTime = typeof data.startTime === 'number' ? Math.max(0, data.startTime) : originalStart;
-      const endTime = typeof data.endTime === 'number' ? Math.max(startTime + 1, data.endTime) : originalEnd;
+      const startTime = originalStart;
+      const endTime = originalEnd;
       const confidence = typeof data.confidence === 'number' ? Math.min(1, Math.max(0, data.confidence)) : 0.92;
-      const reason = String(data.reason || 'Timestamp boundaries verified against requested semantic action.');
+      const reason = String(data.reason || 'Verified match against indexed scene.');
 
       return { match, startTime, endTime, confidence, reason };
     } catch (err) {
