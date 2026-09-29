@@ -31,6 +31,9 @@ export const MODEL_PRICING_RATES: Record<string, { inputPerMillion: number; outp
   'o1-mini': { inputPerMillion: 3.0, outputPerMillion: 12.0 },
   'o3-mini': { inputPerMillion: 1.1, outputPerMillion: 4.4 },
   // Google Gemini
+  'gemini-3.8-flash': { inputPerMillion: 0.10, outputPerMillion: 0.40 },
+  'gemini-3.6-flash': { inputPerMillion: 0.10, outputPerMillion: 0.40 },
+  'gemini-2.5-flash': { inputPerMillion: 0.10, outputPerMillion: 0.40 },
   'gemini-2.0-flash': { inputPerMillion: 0.10, outputPerMillion: 0.40 },
   'gemini-2.0-flash-exp': { inputPerMillion: 0.0, outputPerMillion: 0.0 },
   'gemini-1.5-flash': { inputPerMillion: 0.075, outputPerMillion: 0.30 },

@@ -20,6 +20,7 @@ import {
 import VideoPlayer, { VideoPlayerRef, formatTime } from '@/components/VideoPlayer';
 import TimelineBar from '@/components/TimelineBar';
 import ClipModal from '@/components/ClipModal';
+import ConfirmModal from '@/components/ConfirmModal';
 import { VideoScene } from '@/lib/db/types';
 
 export default function IndexExplorerPage({ params }: { params: { id: string } }) {
@@ -35,6 +36,21 @@ export default function IndexExplorerPage({ params }: { params: { id: string } }
   const [clipStart, setClipStart] = useState(0);
   const [clipEnd, setClipEnd] = useState(10);
   const [clipSceneId, setClipSceneId] = useState<string | undefined>(undefined);
+  const [confirmConfig, setConfirmConfig] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmText?: string;
+    cancelText?: string;
+    variant?: 'danger' | 'warning' | 'info';
+    iconType?: 'trash' | 'stop' | 'warning' | 'refresh';
+    onConfirm: () => void | Promise<void>;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+  });
 
   const playerRef = useRef<VideoPlayerRef | null>(null);
 
@@ -78,17 +94,28 @@ export default function IndexExplorerPage({ params }: { params: { id: string } }
     }
   };
 
-  const handleDeleteSingleScene = async (sceneId: string) => {
-    if (!confirm('Are you sure you want to delete this scene?')) return;
-    try {
-      const res = await fetch(`/api/scenes/${sceneId}`, { method: 'DELETE' });
-      if (res.ok) {
-        setScenes((prev) => prev.filter((s) => s.id !== sceneId));
-        if (selectedScene?.id === sceneId) setSelectedScene(null);
-      }
-    } catch (e) {
-      console.error('Delete scene error:', e);
-    }
+  const handleDeleteSingleScene = (sceneId: string, sceneNumber?: number) => {
+    setConfirmConfig({
+      isOpen: true,
+      title: `Delete Scene${sceneNumber ? ` #${sceneNumber}` : ''}?`,
+      message: 'Are you sure you want to delete this scene and its visual/transcript embeddings from the index? This cannot be undone.',
+      confirmText: 'Delete Scene',
+      cancelText: 'Cancel',
+      variant: 'danger',
+      iconType: 'trash',
+      onConfirm: async () => {
+        try {
+          const res = await fetch(`/api/scenes/${sceneId}`, { method: 'DELETE' });
+          if (res.ok) {
+            setScenes((prev) => prev.filter((s) => s.id !== sceneId));
+            if (selectedScene?.id === sceneId) setSelectedScene(null);
+          }
+        } catch (e) {
+          console.error('Delete scene error:', e);
+        }
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
   };
 
   const filteredScenes = scenes.filter((s) => {
@@ -326,7 +353,7 @@ export default function IndexExplorerPage({ params }: { params: { id: string } }
 
                     <div className="flex items-center space-x-1" onClick={(e) => e.stopPropagation()}>
                       <button
-                        onClick={() => handleDeleteSingleScene(scene.id)}
+                        onClick={() => handleDeleteSingleScene(scene.id, scene.sceneNumber)}
                         className="p-1 rounded text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
                         title="Delete scene"
                       >
@@ -368,6 +395,19 @@ export default function IndexExplorerPage({ params }: { params: { id: string } }
           sceneId={clipSceneId}
         />
       )}
+
+      {/* Custom Confirmation Modal */}
+      <ConfirmModal
+        isOpen={confirmConfig.isOpen}
+        title={confirmConfig.title}
+        message={confirmConfig.message}
+        confirmText={confirmConfig.confirmText}
+        cancelText={confirmConfig.cancelText}
+        variant={confirmConfig.variant}
+        iconType={confirmConfig.iconType}
+        onConfirm={confirmConfig.onConfirm}
+        onClose={() => setConfirmConfig((prev) => ({ ...prev, isOpen: false }))}
+      />
     </div>
   );
 }

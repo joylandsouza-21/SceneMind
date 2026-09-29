@@ -22,12 +22,15 @@ import {
   Tag,
   ShieldCheck,
   RotateCcw,
-  Sliders
+  Sliders,
+  X
 } from 'lucide-react';
 import { formatTime } from '@/components/VideoPlayer';
 import BulkUploadQueueModal from '@/components/BulkUploadQueueModal';
 import GroupSelectDropdown from '@/components/GroupSelectDropdown';
 import ProcessingLogsConsole from '@/components/ProcessingLogsConsole';
+import ConfirmModal from '@/components/ConfirmModal';
+import AssignGroupModal from '@/components/AssignGroupModal';
 
 export default function VideosPage() {
   const [videos, setVideos] = useState<any[]>([]);
@@ -51,6 +54,22 @@ export default function VideosPage() {
   const [inlineGroupName, setInlineGroupName] = useState('');
   const [reprocessingId, setReprocessingId] = useState<string | null>(null);
   const [deletingVideoId, setDeletingVideoId] = useState<string | null>(null);
+  const [groupModalVideo, setGroupModalVideo] = useState<any | null>(null);
+  const [confirmConfig, setConfirmConfig] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmText?: string;
+    cancelText?: string;
+    variant?: 'danger' | 'warning' | 'info';
+    iconType?: 'trash' | 'stop' | 'warning' | 'refresh';
+    onConfirm: () => void | Promise<void>;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+  });
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const handleReprocessVideo = async (videoId: string, e: React.MouseEvent) => {
@@ -295,13 +314,25 @@ export default function VideosPage() {
     }
   };
 
-  const handleDeleteVideo = async (videoId: string, e: React.MouseEvent) => {
+  const promptDeleteVideo = (videoId: string, filename: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!confirm('Are you sure you want to delete this video and all its scenes/embeddings?')) {
-      return;
-    }
+    setConfirmConfig({
+      isOpen: true,
+      title: 'Delete Video?',
+      message: `Are you sure you want to delete "${filename}" and all its scenes, embeddings, and transcripts? This action cannot be undone.`,
+      confirmText: 'Delete Video',
+      cancelText: 'Cancel',
+      variant: 'danger',
+      iconType: 'trash',
+      onConfirm: async () => {
+        await executeDeleteVideo(videoId);
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
+  };
 
+  const executeDeleteVideo = async (videoId: string) => {
     setDeletingVideoId(videoId);
     // Optimistically remove from state immediately
     setVideos((prev) => prev.filter((v) => v.id !== videoId));
@@ -320,6 +351,25 @@ export default function VideosPage() {
     } finally {
       setDeletingVideoId(null);
     }
+  };
+
+  const promptCancelProcessing = (videoId: string, filename: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setConfirmConfig({
+      isOpen: true,
+      title: `Cancel Processing for "${filename}"?`,
+      message: 'Are you sure you want to stop processing and indexing this video? Ongoing AI tasks will be terminated.',
+      confirmText: 'Stop Processing',
+      cancelText: 'Keep Running',
+      variant: 'warning',
+      iconType: 'stop',
+      onConfirm: async () => {
+        await fetch(`/api/jobs/${videoId}/cancel`, { method: 'POST' });
+        refreshAll();
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
   };
 
   const handleCreateGroup = async (e: React.FormEvent) => {
@@ -351,6 +401,8 @@ export default function VideosPage() {
   const displayedVideos =
     activeGroupId === 'all'
       ? videos
+      : activeGroupId === 'ungrouped'
+      ? videos.filter((v) => !v.groupId)
       : videos.filter((v) => v.groupId === activeGroupId);
 
   return (
@@ -677,6 +729,24 @@ export default function VideosPage() {
             </span>
           </button>
 
+          <button
+            onClick={() => setActiveGroupId('ungrouped')}
+            className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-all flex items-center space-x-2 ${
+              activeGroupId === 'ungrouped'
+                ? 'bg-amber-600 text-white shadow-md shadow-amber-500/20'
+                : 'bg-slate-900/80 text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-slate-800'
+            }`}
+            title="Videos not assigned to any show or group"
+          >
+            <Layers className="w-3.5 h-3.5" />
+            <span>No Group (Ungrouped)</span>
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+              activeGroupId === 'ungrouped' ? 'bg-amber-500 text-white' : 'bg-slate-800 text-slate-400'
+            }`}>
+              {videos.filter((v) => !v.groupId).length}
+            </span>
+          </button>
+
           {groups.map((group) => {
             const count = videos.filter((v) => v.groupId === group.id).length;
             const isActive = activeGroupId === group.id;
@@ -809,16 +879,25 @@ export default function VideosPage() {
               >
                 <div>
                   {/* Thumbnail / Header */}
-                  <Link href={`/videos/${video.id}`} className="block relative aspect-video bg-slate-950 overflow-hidden group/thumb cursor-pointer">
-                    <img
-                      src={`/api/media/thumbnails/thumb_${video.id}.jpg`}
-                      alt={video.filename}
-                      className="w-full h-full object-cover group-hover/thumb:scale-105 transition-transform duration-300"
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).style.display = 'none';
-                      }}
-                    />
-                    <div className="absolute top-3 left-3 flex flex-wrap gap-1.5">
+                  <div className="relative aspect-video bg-slate-950 overflow-hidden group/thumb">
+                    <Link
+                      href={`/videos/${video.id}`}
+                      className="block w-full h-full cursor-pointer"
+                      title="Open in Video Studio"
+                    >
+                      <img
+                        src={`/api/media/thumbnails/thumb_${video.id}.jpg`}
+                        alt={video.filename}
+                        className="w-full h-full object-cover group-hover/thumb:scale-105 transition-transform duration-300"
+                        onError={(e) => {
+                          (e.target as HTMLImageElement).style.display = 'none';
+                        }}
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-black/20 pointer-events-none" />
+                    </Link>
+
+                    {/* Top Badges (Outside Link to avoid router redirect) */}
+                    <div className="absolute top-3 left-3 z-10 flex flex-wrap items-center gap-1.5 pointer-events-auto">
                       <span
                         className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-md backdrop-blur-md ${
                           video.status === 'indexed'
@@ -839,17 +918,42 @@ export default function VideosPage() {
                           : video.status}
                       </span>
 
-                      {video.groupName && (
-                        <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-indigo-900/80 text-indigo-200 backdrop-blur-md border border-indigo-500/30 flex items-center space-x-1">
-                          <Folder className="w-3 h-3 text-indigo-400" />
+                      {video.groupName ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setGroupModalVideo(video);
+                          }}
+                          className="text-[10px] font-semibold px-2 py-1 rounded-md bg-indigo-900/90 hover:bg-indigo-800 text-indigo-200 hover:text-white backdrop-blur-md border border-indigo-500/40 flex items-center space-x-1 transition-all cursor-pointer group/grp shadow-sm"
+                          title={`Assigned to show "${video.groupName}". Click to change or remove from group.`}
+                        >
+                          <Folder className="w-3 h-3 text-indigo-400 group-hover/grp:scale-110 transition-transform" />
                           <span className="truncate max-w-[120px]">{video.groupName}</span>
-                        </span>
+                          <span className="text-[9px] text-indigo-300 ml-0.5 opacity-70 group-hover/grp:opacity-100">✎</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setGroupModalVideo(video);
+                          }}
+                          className="text-[10px] font-medium px-2 py-1 rounded-md bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white border border-dashed border-slate-600 hover:border-slate-400 flex items-center space-x-1 transition-all cursor-pointer shadow-sm"
+                          title="No group assigned. Click to add to a show or group."
+                        >
+                          <Plus className="w-2.5 h-2.5 text-blue-400" />
+                          <span>Add Group</span>
+                        </button>
                       )}
                     </div>
-                    <div className="absolute bottom-3 right-3 px-2 py-0.5 rounded bg-black/80 text-xs font-mono text-slate-200 backdrop-blur-sm">
+
+                    <div className="absolute bottom-3 right-3 z-10 px-2 py-0.5 rounded bg-black/80 text-xs font-mono text-slate-200 backdrop-blur-sm pointer-events-none">
                       {formatTime(video.duration)}
                     </div>
-                  </Link>
+                  </div>
 
                   {/* Body Info */}
                   <div className="p-5 space-y-3">
@@ -959,10 +1063,31 @@ export default function VideosPage() {
                           <span>Studio</span>
                         </Link>
 
+                        <button
+                          type="button"
+                          onClick={(e) => handleReprocessVideo(video.id, e)}
+                          disabled={reprocessingId === video.id}
+                          className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white text-xs font-semibold border border-amber-500/30 transition-all shadow-sm cursor-pointer"
+                          title="Restart AI indexing pipeline for this video (useful if stuck after server restart)"
+                        >
+                          <RotateCcw className={`w-3.5 h-3.5 ${reprocessingId === video.id ? 'animate-spin' : ''}`} />
+                          <span>Reprocess</span>
+                        </button>
+
                         <span className="text-[11px] text-amber-400/80 italic flex items-center gap-1.5 font-medium">
                           <RefreshCw className="w-3 h-3 animate-spin" />
                           <span>Processing ({video.processingProgress}%)</span>
                         </span>
+
+                        <button
+                          type="button"
+                          onClick={(e) => promptCancelProcessing(video.id, video.filename || video.title, e)}
+                          className="px-2 py-1 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs font-medium border border-red-500/30 transition-colors flex items-center space-x-1"
+                          title="Cancel background indexing and stop processing"
+                        >
+                          <X className="w-3 h-3" />
+                          <span>Cancel</span>
+                        </button>
                       </div>
                     )}
                     {(video.status === 'failed' || video.status === 'cancelled') && (
@@ -998,18 +1123,33 @@ export default function VideosPage() {
                     )}
                   </div>
 
-                  <button
-                    onClick={(e) => handleDeleteVideo(video.id, e)}
-                    disabled={deletingVideoId === video.id}
-                    className="p-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
-                    title={deletingVideoId === video.id ? 'Deleting video...' : 'Delete video'}
-                  >
-                    {deletingVideoId === video.id ? (
-                      <RefreshCw className="w-4 h-4 animate-spin text-red-400" />
-                    ) : (
-                      <Trash2 className="w-4 h-4" />
-                    )}
-                  </button>
+                  <div className="flex items-center space-x-1">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setGroupModalVideo(video);
+                      }}
+                      className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-300 hover:bg-slate-800 transition-colors"
+                      title={video.groupName ? `Manage group (${video.groupName})` : 'Assign to show / group'}
+                    >
+                      <Folder className="w-4 h-4" />
+                    </button>
+
+                    <button
+                      onClick={(e) => promptDeleteVideo(video.id, video.filename || video.title, e)}
+                      disabled={deletingVideoId === video.id}
+                      className="p-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                      title={deletingVideoId === video.id ? 'Deleting video...' : 'Delete video'}
+                    >
+                      {deletingVideoId === video.id ? (
+                        <RefreshCw className="w-4 h-4 animate-spin text-red-400" />
+                      ) : (
+                        <Trash2 className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}
@@ -1024,6 +1164,31 @@ export default function VideosPage() {
         onUploadSuccess={refreshAll}
         groups={groups}
         onRefreshGroups={fetchGroups}
+      />
+
+      {/* Custom Confirmation Modal */}
+      <ConfirmModal
+        isOpen={confirmConfig.isOpen}
+        title={confirmConfig.title}
+        message={confirmConfig.message}
+        confirmText={confirmConfig.confirmText}
+        cancelText={confirmConfig.cancelText}
+        variant={confirmConfig.variant}
+        iconType={confirmConfig.iconType}
+        onConfirm={confirmConfig.onConfirm}
+        onClose={() => setConfirmConfig((prev) => ({ ...prev, isOpen: false }))}
+      />
+
+      {/* Assign / Change / Remove Group Modal */}
+      <AssignGroupModal
+        isOpen={Boolean(groupModalVideo)}
+        video={groupModalVideo}
+        groups={groups}
+        onClose={() => setGroupModalVideo(null)}
+        onSuccess={() => {
+          refreshAll();
+          fetchGroups();
+        }}
       />
     </div>
   );

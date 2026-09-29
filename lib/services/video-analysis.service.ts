@@ -3,6 +3,7 @@ import { GoogleAIFileManager } from '@google/generative-ai/server';
 import { VIDEO_ANALYSIS_SYSTEM_PROMPT, buildVideoAnalysisUserPrompt } from '../../prompts/video-analysis';
 import { pricingService } from './pricing.service';
 import { aiConfigService } from './ai-config.service';
+import { db } from '../db';
 import fs from 'fs';
 import path from 'path';
 import { Readable } from 'stream';
@@ -99,6 +100,20 @@ export class VideoAnalysisService {
     return data.file;
   }
 
+  private async isJobCancelled(videoId?: string, checkCancelled?: () => boolean): Promise<boolean> {
+    if (checkCancelled && checkCancelled()) return true;
+    if (!videoId) return false;
+    try {
+      const { jobQueueService } = await import('./job-queue.service');
+      if (jobQueueService.isCancelled(videoId)) return true;
+    } catch {}
+    const v = db.getVideo(videoId);
+    if (!v || v.status === 'cancelled') return true;
+    const jobs = db.getJobs(videoId);
+    if (jobs.length > 0 && jobs.every((j) => j.status === 'cancelled')) return true;
+    return false;
+  }
+
   public async analyzeVideo(
     videoPath: string,
     durationSeconds: number,
@@ -108,6 +123,7 @@ export class VideoAnalysisService {
       samplingInterval?: number;
       videoId?: string;
       videoTitle?: string;
+      checkCancelled?: () => boolean;
       onProgress?: (step: string, percent?: number) => void;
     }
   ): Promise<VideoAnalysisResult> {
@@ -127,6 +143,7 @@ export class VideoAnalysisService {
         config.modelName || 'gemini-2.0-flash',
         options?.videoId,
         options?.videoTitle,
+        options?.checkCancelled,
         options?.onProgress
       );
       return result;
@@ -147,11 +164,17 @@ export class VideoAnalysisService {
     modelName: string,
     videoId?: string,
     videoTitle?: string,
+    checkCancelled?: () => boolean,
     onProgress?: (step: string, percent?: number) => void
   ): Promise<VideoAnalysisResult> {
     const startTime = Date.now();
     const genAI = new GoogleGenerativeAI(apiKey);
     const fileManager = new GoogleAIFileManager(apiKey);
+
+    if (await this.isJobCancelled(videoId, checkCancelled)) {
+      console.log(`[VIDEO_ANALYSIS] Video ${videoId} was cancelled before starting Gemini analysis.`);
+      throw new Error('VIDEO_ANALYSIS_CANCELLED_BY_USER');
+    }
 
     const model = genAI.getGenerativeModel({
       model: modelName,
@@ -174,6 +197,10 @@ export class VideoAnalysisService {
     // Use Gemini File API to upload the actual video file so Gemini sees the real frames
     if (fs.existsSync(videoPath)) {
       try {
+        if (await this.isJobCancelled(videoId, checkCancelled)) {
+          throw new Error('VIDEO_ANALYSIS_CANCELLED_BY_USER');
+        }
+
         const stats = fs.statSync(videoPath);
         const sizeMB = Math.round((stats.size / (1024 * 1024)) * 10) / 10;
         const msg = `Streaming video (${sizeMB} MB) to Google Gemini File API (${modelName})...`;
@@ -185,6 +212,9 @@ export class VideoAnalysisService {
           mimeType: 'video/mp4',
           displayName: path.basename(videoPath),
         }).catch(async (streamErr) => {
+          if (await this.isJobCancelled(videoId, checkCancelled)) {
+            throw new Error('VIDEO_ANALYSIS_CANCELLED_BY_USER');
+          }
           console.warn(`[VIDEO_ANALYSIS] Streamed upload notice (${streamErr.message}), attempting standard upload.`);
           const uploadResult = await fileManager.uploadFile(videoPath, {
             mimeType: 'video/mp4',
@@ -193,17 +223,39 @@ export class VideoAnalysisService {
           return uploadResult.file;
         });
 
+        if (await this.isJobCancelled(videoId, checkCancelled)) {
+          if (uploaded) {
+            try { await fileManager.deleteFile(uploaded.name); } catch {}
+          }
+          throw new Error('VIDEO_ANALYSIS_CANCELLED_BY_USER');
+        }
+
         if (onProgress) onProgress(`Video stream sent to Gemini. Waiting for frame processing state (ACTIVE)...`, 38);
 
         let file = await fileManager.getFile(uploaded.name);
         let pollCount = 0;
         while (file.state === 'PROCESSING') {
+          if (await this.isJobCancelled(videoId, checkCancelled)) {
+            console.log(`[VIDEO_ANALYSIS] Detected cancellation for video ${videoId}. Aborting Gemini file wait.`);
+            try { await fileManager.deleteFile(uploaded.name); } catch {}
+            throw new Error('VIDEO_ANALYSIS_CANCELLED_BY_USER');
+          }
           pollCount++;
           const waitMsg = `Waiting for Gemini video frame processing (${pollCount * 3}s elapsed)...`;
           console.log(`[VIDEO_ANALYSIS] ${waitMsg}`);
           if (onProgress) onProgress(waitMsg, Math.min(48, 38 + pollCount * 2));
           await new Promise((resolve) => setTimeout(resolve, 3000));
+          if (await this.isJobCancelled(videoId, checkCancelled)) {
+            console.log(`[VIDEO_ANALYSIS] Detected cancellation for video ${videoId} after wait. Aborting.`);
+            try { await fileManager.deleteFile(uploaded.name); } catch {}
+            throw new Error('VIDEO_ANALYSIS_CANCELLED_BY_USER');
+          }
           file = await fileManager.getFile(uploaded.name);
+        }
+
+        if (await this.isJobCancelled(videoId, checkCancelled)) {
+          try { await fileManager.deleteFile(uploaded.name); } catch {}
+          throw new Error('VIDEO_ANALYSIS_CANCELLED_BY_USER');
         }
 
         if (file.state === 'ACTIVE') {
@@ -221,9 +273,20 @@ export class VideoAnalysisService {
           console.warn(`[VIDEO_ANALYSIS] Video state is ${file.state}, proceeding with fallback.`);
         }
       } catch (err: any) {
+        if (err.message === 'VIDEO_ANALYSIS_CANCELLED_BY_USER' || (await this.isJobCancelled(videoId, checkCancelled))) {
+          console.log(`[VIDEO_ANALYSIS] Video analysis cancelled for video ${videoId}. Terminating immediately.`);
+          throw new Error('VIDEO_ANALYSIS_CANCELLED_BY_USER');
+        }
         console.warn(`[VIDEO_ANALYSIS] Gemini File API upload failed: ${err.message}.`);
         if (onProgress) onProgress(`Gemini direct stream failed (${err.message}). Falling back to narrative analysis...`, 45);
       }
+    }
+
+    if (await this.isJobCancelled(videoId, checkCancelled)) {
+      if (uploadedFile && fileManager) {
+        try { await fileManager.deleteFile(uploadedFile.name); } catch {}
+      }
+      throw new Error('VIDEO_ANALYSIS_CANCELLED_BY_USER');
     }
 
     promptParts.push(userPrompt);

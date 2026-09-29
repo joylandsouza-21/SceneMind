@@ -16,6 +16,7 @@ import {
   CheckCircle2,
   RefreshCw
 } from 'lucide-react';
+import ConfirmModal from '@/components/ConfirmModal';
 
 export interface SearchHistoryItem {
   id: string;
@@ -48,6 +49,21 @@ export default function SearchHistoryModal({
   const [loading, setLoading] = useState(false);
   const [filterQuery, setFilterQuery] = useState('');
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [confirmConfig, setConfirmConfig] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmText?: string;
+    cancelText?: string;
+    variant?: 'danger' | 'warning' | 'info';
+    iconType?: 'trash' | 'stop' | 'warning' | 'refresh';
+    onConfirm: () => void | Promise<void>;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+  });
 
   const fetchHistory = async () => {
     setLoading(true);
@@ -98,18 +114,27 @@ export default function SearchHistoryModal({
     }
   };
 
-  const handleClearAll = async () => {
-    if (!confirm('Are you sure you want to clear all semantic search history?')) {
-      return;
-    }
-    try {
-      const res = await fetch('/api/search/history', { method: 'DELETE' });
-      if (res.ok) {
-        setHistory([]);
-      }
-    } catch (e) {
-      console.error('Failed to clear search history:', e);
-    }
+  const promptClearAll = () => {
+    setConfirmConfig({
+      isOpen: true,
+      title: 'Clear Search History?',
+      message: 'Are you sure you want to clear all semantic search history? This cannot be undone.',
+      confirmText: 'Clear All History',
+      cancelText: 'Cancel',
+      variant: 'danger',
+      iconType: 'trash',
+      onConfirm: async () => {
+        try {
+          const res = await fetch('/api/search/history', { method: 'DELETE' });
+          if (res.ok) {
+            setHistory([]);
+          }
+        } catch (e) {
+          console.error('Failed to clear search history:', e);
+        }
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
   };
 
   const filteredHistory = history.filter((h) => {
@@ -174,7 +199,7 @@ export default function SearchHistoryModal({
             {history.length > 0 && (
               <button
                 type="button"
-                onClick={handleClearAll}
+                onClick={promptClearAll}
                 className="flex items-center space-x-1 px-2.5 py-1.5 rounded-xl text-[11px] text-slate-400 hover:text-red-400 hover:bg-red-500/10 border border-slate-800 hover:border-red-500/30 transition-colors"
                 title="Clear all search history"
               >
@@ -324,6 +349,19 @@ export default function SearchHistoryModal({
           </button>
         </div>
       </div>
+
+      {/* Custom Confirmation Modal */}
+      <ConfirmModal
+        isOpen={confirmConfig.isOpen}
+        title={confirmConfig.title}
+        message={confirmConfig.message}
+        confirmText={confirmConfig.confirmText}
+        cancelText={confirmConfig.cancelText}
+        variant={confirmConfig.variant}
+        iconType={confirmConfig.iconType}
+        onConfirm={confirmConfig.onConfirm}
+        onClose={() => setConfirmConfig((prev) => ({ ...prev, isOpen: false }))}
+      />
     </div>
   );
 }

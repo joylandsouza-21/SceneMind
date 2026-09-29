@@ -10,6 +10,13 @@ export async function POST(
 ) {
   try {
     const targetId = params.id;
+    if (targetId === 'all') {
+      jobQueueService.cancelAllJobs();
+      return NextResponse.json({
+        success: true,
+        message: 'All processing pipelines cancelled',
+      });
+    }
     jobQueueService.cancelJob(targetId);
 
     const job = db.getJob(targetId) || db.getJobs(targetId)[0];

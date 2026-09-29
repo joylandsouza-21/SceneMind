@@ -99,7 +99,7 @@ Respond ONLY with valid JSON in this exact structure:
         if (config.provider === 'gemini') {
           const genAI = new GoogleGenerativeAI(config.apiKey);
           const model = genAI.getGenerativeModel({
-            model: config.modelName || 'gemini-2.0-flash',
+            model: config.modelName || 'gemini-3.8-flash',
             generationConfig: {
               responseMimeType: 'application/json',
               temperature: 0.2,
@@ -383,7 +383,7 @@ Respond ONLY with valid JSON array of evaluations:
         if (config.provider === 'gemini') {
           const genAI = new GoogleGenerativeAI(config.apiKey);
           const model = genAI.getGenerativeModel({
-            model: config.modelName || 'gemini-2.0-flash',
+            model: config.modelName || 'gemini-3.8-flash',
             generationConfig: {
               responseMimeType: 'application/json',
               temperature: 0.1,

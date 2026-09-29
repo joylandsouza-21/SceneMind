@@ -34,6 +34,7 @@ export class FFmpegService {
   private ffprobePath: string;
   private cachedHwEncoder: 'nvenc' | 'vaapi' | 'qsv' | 'cpu' | null = null;
   private activeProcesses: Map<string, Set<any>> = new Map();
+  private abortedKeys: Set<string> = new Set();
 
   constructor() {
     this.ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
@@ -70,6 +71,7 @@ export class FFmpegService {
   }
 
   public killProcesses(key: string): void {
+    this.abortedKeys.add(key);
     const set = this.activeProcesses.get(key);
     if (set && set.size > 0) {
       console.log(`[FFMPEG] Terminating ${set.size} active child process(es) for key: ${key}`);
@@ -82,6 +84,14 @@ export class FFmpegService {
       }
       this.activeProcesses.delete(key);
     }
+  }
+
+  public isAborted(key: string): boolean {
+    return this.abortedKeys.has(key);
+  }
+
+  public clearAborted(key: string): void {
+    this.abortedKeys.delete(key);
   }
 
   /**
@@ -321,6 +331,12 @@ export class FFmpegService {
         });
 
         child.on('close', (code) => {
+          if (options.abortKey && this.isAborted(options.abortKey)) {
+            if (fs.existsSync(outputVideoPath)) {
+              try { fs.unlinkSync(outputVideoPath); } catch {}
+            }
+            return reject(new Error('TRANSCODE_ABORTED_BY_USER'));
+          }
           if (code === 0 && fs.existsSync(outputVideoPath)) {
             if (options.onProgress) options.onProgress(100, 'Stream copy complete (100%)');
             resolve(outputVideoPath);
@@ -431,6 +447,12 @@ export class FFmpegService {
         });
 
         child.on('close', (code) => {
+          if (options.abortKey && this.isAborted(options.abortKey)) {
+            if (fs.existsSync(outputVideoPath)) {
+              try { fs.unlinkSync(outputVideoPath); } catch {}
+            }
+            return reject(new Error('TRANSCODE_ABORTED_BY_USER'));
+          }
           if (code === 0 && fs.existsSync(outputVideoPath)) {
             if (options?.onProgress) options.onProgress(100, `Conversion complete via ${encoderLabel} (100%)`);
             resolve(outputVideoPath);
@@ -453,6 +475,9 @@ export class FFmpegService {
       const label = encoder === 'nvenc' ? 'GPU NVENC' : encoder === 'vaapi' ? 'GPU VAAPI' : encoder === 'qsv' ? 'GPU QSV' : 'CPU';
       return await runSpawn(buildArgs(encoder), label);
     } catch (gpuErr: any) {
+      if (options.abortKey && this.isAborted(options.abortKey)) {
+        throw gpuErr;
+      }
       if (encoder !== 'cpu') {
         console.warn(`[FFMPEG] GPU encoder (${encoder}) failed at runtime (${gpuErr.message}). Falling back to CPU ultrafast...`);
         this.cachedHwEncoder = 'cpu';

@@ -20,12 +20,18 @@ import {
   Sliders,
   ExternalLink,
   Play,
-  RotateCcw
+  RotateCcw,
+  AlertCircle,
+  X,
+  Folder,
+  Plus
 } from 'lucide-react';
 import VideoPlayer, { VideoPlayerRef, formatTime } from '@/components/VideoPlayer';
 import TimelineBar from '@/components/TimelineBar';
 import ClipModal from '@/components/ClipModal';
 import ProcessingLogsConsole from '@/components/ProcessingLogsConsole';
+import ConfirmModal from '@/components/ConfirmModal';
+import AssignGroupModal from '@/components/AssignGroupModal';
 import { VideoScene } from '@/lib/db/types';
 
 function VideoStudioContent({ params }: { params: { id: string } }) {
@@ -53,8 +59,24 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
   const [clipEnd, setClipEnd] = useState(10);
   const [clipSceneId, setClipSceneId] = useState<string | undefined>(undefined);
 
+  // Group modal state
+  const [groups, setGroups] = useState<any[]>([]);
+  const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
+
   const playerRef = useRef<VideoPlayerRef | null>(null);
   const hasScrolledRef = useRef(false);
+
+  const fetchGroups = async () => {
+    try {
+      const res = await fetch('/api/groups');
+      if (res.ok) {
+        const data = await res.json();
+        setGroups(data.groups || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch groups:', err);
+    }
+  };
 
   const fetchVideoDetails = async () => {
     try {
@@ -88,6 +110,7 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
 
   useEffect(() => {
     fetchVideoDetails();
+    fetchGroups();
     const interval = setInterval(fetchVideoDetails, 3000);
 
     let es: EventSource | null = null;
@@ -181,11 +204,39 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
   };
 
   const [deleting, setDeleting] = useState(false);
+  const [confirmConfig, setConfirmConfig] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmText?: string;
+    cancelText?: string;
+    variant?: 'danger' | 'warning' | 'info';
+    iconType?: 'trash' | 'stop' | 'warning' | 'refresh';
+    onConfirm: () => void | Promise<void>;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+  });
 
-  const handleDeleteVideo = async () => {
-    if (!confirm('Are you sure you want to delete this video and all its scenes/embeddings?')) {
-      return;
-    }
+  const promptDeleteVideo = () => {
+    setConfirmConfig({
+      isOpen: true,
+      title: 'Delete Video?',
+      message: `Are you sure you want to delete "${video?.filename || video?.title || 'this video'}" and all its scenes, embeddings, and transcripts? This action cannot be undone.`,
+      confirmText: 'Delete Video',
+      cancelText: 'Cancel',
+      variant: 'danger',
+      iconType: 'trash',
+      onConfirm: async () => {
+        await executeDeleteVideo();
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
+  };
+
+  const executeDeleteVideo = async () => {
     setDeleting(true);
     try {
       const res = await fetch(`/api/videos/${params.id}`, { method: 'DELETE' });
@@ -201,16 +252,46 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
     }
   };
 
-  const handleReindex = async () => {
-    if (!confirm('Re-index this entire video with AI? Existing embeddings will be refreshed.')) {
-      return;
-    }
+  const promptReindex = () => {
+    setConfirmConfig({
+      isOpen: true,
+      title: 'Re-index Video with AI?',
+      message: 'This will re-run scene detection, transcription, and multi-modal semantic embeddings. Existing embeddings will be refreshed.',
+      confirmText: 'Re-index Now',
+      cancelText: 'Cancel',
+      variant: 'warning',
+      iconType: 'refresh',
+      onConfirm: async () => {
+        await executeReindex();
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
+  };
+
+  const executeReindex = async () => {
     try {
       await fetch(`/api/videos/${params.id}/reindex`, { method: 'POST' });
       fetchVideoDetails();
     } catch (e) {
       console.error('Reindex error:', e);
     }
+  };
+
+  const promptCancelProcessing = () => {
+    setConfirmConfig({
+      isOpen: true,
+      title: 'Cancel Processing?',
+      message: 'Are you sure you want to stop background video indexing immediately?',
+      confirmText: 'Stop Processing',
+      cancelText: 'Keep Running',
+      variant: 'warning',
+      iconType: 'stop',
+      onConfirm: async () => {
+        await fetch(`/api/jobs/${video.id}/cancel`, { method: 'POST' });
+        fetchVideoDetails();
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
   };
 
   if (loading && !video) {
@@ -264,9 +345,32 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
                 {video.status}
               </span>
             </div>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Duration: {formatTime(video.duration)} • {video.width}x{video.height} • {video.fps} FPS
-            </p>
+            <div className="flex items-center gap-2 mt-1">
+              <p className="text-xs text-slate-500">
+                Duration: {formatTime(video.duration)} • {video.width}x{video.height} • {video.fps} FPS
+              </p>
+              <span className="text-slate-700">•</span>
+              {video.groupName ? (
+                <button
+                  onClick={() => setIsGroupModalOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-xs font-medium bg-indigo-500/10 text-indigo-400 border border-indigo-500/25 hover:bg-indigo-500/20 hover:border-indigo-500/40 transition-all cursor-pointer group"
+                  title="Click to change group or remove to 'No Group'"
+                >
+                  <Folder className="w-3 h-3 text-indigo-400" />
+                  <span className="font-semibold text-slate-200">{video.groupName}</span>
+                  <span className="text-[10px] text-indigo-300/60 group-hover:text-indigo-200 ml-0.5 underline">Change</span>
+                </button>
+              ) : (
+                <button
+                  onClick={() => setIsGroupModalOpen(true)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-medium bg-slate-800/80 text-slate-400 border border-slate-700/60 hover:text-white hover:bg-slate-700 hover:border-slate-600 transition-all cursor-pointer"
+                  title="Assign this video to a group or show"
+                >
+                  <Plus className="w-3 h-3 text-blue-400" />
+                  <span>Add Group</span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
@@ -290,7 +394,7 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
           </Link>
 
           <button
-            onClick={handleReindex}
+            onClick={promptReindex}
             className="p-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 hover:text-white transition-colors"
             title="Force re-run AI indexing"
           >
@@ -298,7 +402,7 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
           </button>
 
           <button
-            onClick={handleDeleteVideo}
+            onClick={promptDeleteVideo}
             disabled={deleting}
             className="p-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
             title="Delete video"
@@ -341,7 +445,7 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
 
             <button
               type="button"
-              onClick={handleReindex}
+              onClick={promptReindex}
               className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-semibold transition-colors flex items-center space-x-1.5 shadow-md shadow-amber-500/20"
             >
               <RotateCcw className="w-3.5 h-3.5" />
@@ -394,6 +498,37 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
         </div>
       )}
 
+      {/* Video Cancelled Banner */}
+      {video.status === 'cancelled' && (
+        <div className="p-4 rounded-2xl bg-amber-950/30 border border-amber-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs animate-in fade-in">
+          <div className="flex items-start space-x-3 min-w-0">
+            <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0 mt-0.5">
+              <AlertCircle className="w-4 h-4" />
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center space-x-2">
+                <span className="font-bold text-amber-300">Processing Cancelled</span>
+                <span className="text-slate-400">• Pipeline stopped by user</span>
+              </div>
+              <p className="text-slate-300/90 leading-relaxed">
+                Background video processing and transcoding was cancelled. You can restart processing anytime.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-2 shrink-0 self-end sm:self-center">
+            <button
+              type="button"
+              onClick={promptReindex}
+              className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-semibold transition-colors flex items-center space-x-1.5 shadow-md shadow-amber-500/20"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Restart Processing</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Processing Status Banner with Live Terminal Logs */}
       {(video.status === 'processing' || video.status === 'pending') && (
         <div className="p-5 rounded-2xl bg-slate-900/90 border border-amber-500/30 space-y-4">
@@ -402,7 +537,27 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
               <Activity className="w-4 h-4 animate-spin" />
               <span>Indexing Video & Analyzing Scenes in Background...</span>
             </div>
-            <span className="font-mono text-amber-400 text-sm font-bold">{video.processingProgress}%</span>
+            <div className="flex items-center space-x-3">
+              <span className="font-mono text-amber-400 text-sm font-bold">{video.processingProgress}%</span>
+              <button
+                type="button"
+                onClick={promptReindex}
+                className="px-2.5 py-1 rounded-lg bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white border border-amber-500/40 text-xs font-semibold transition-colors flex items-center space-x-1 cursor-pointer"
+                title="Restart AI indexing pipeline (useful if stuck after server restart)"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Reprocess</span>
+              </button>
+              <button
+                type="button"
+                onClick={promptCancelProcessing}
+                className="px-2.5 py-1 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/40 text-xs font-semibold transition-colors flex items-center space-x-1 cursor-pointer"
+                title="Stop video indexing pipeline immediately"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>Cancel</span>
+              </button>
+            </div>
           </div>
 
           <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
@@ -689,6 +844,31 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
         initialStart={clipStart}
         initialEnd={clipEnd}
         sceneId={clipSceneId}
+      />
+
+      {/* Custom Confirmation Modal */}
+      <ConfirmModal
+        isOpen={confirmConfig.isOpen}
+        title={confirmConfig.title}
+        message={confirmConfig.message}
+        confirmText={confirmConfig.confirmText}
+        cancelText={confirmConfig.cancelText}
+        variant={confirmConfig.variant}
+        iconType={confirmConfig.iconType}
+        onConfirm={confirmConfig.onConfirm}
+        onClose={() => setConfirmConfig((prev) => ({ ...prev, isOpen: false }))}
+      />
+
+      {/* Assign / Change / Remove Group Modal */}
+      <AssignGroupModal
+        isOpen={isGroupModalOpen}
+        video={video}
+        groups={groups}
+        onClose={() => setIsGroupModalOpen(false)}
+        onSuccess={() => {
+          fetchVideoDetails();
+          fetchGroups();
+        }}
       />
     </div>
   );

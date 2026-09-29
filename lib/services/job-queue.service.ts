@@ -29,6 +29,40 @@ class JobQueueService extends EventEmitter {
   constructor() {
     super();
     this.setMaxListeners(100);
+    if (typeof window === 'undefined') {
+      setTimeout(() => {
+        this.recoverInterruptedJobsOnStartup();
+      }, 500);
+    }
+  }
+
+  public isJobActive(videoId: string): boolean {
+    return this.activeJobs.has(videoId);
+  }
+
+  public recoverInterruptedJobsOnStartup(): void {
+    try {
+      const videos = db.getVideos();
+      for (const video of videos) {
+        if ((video.status === 'processing' || video.status === 'pending') && !this.activeJobs.has(video.id)) {
+          console.log(`[JOB_QUEUE] Flagging interrupted video on startup: ${video.id} (${video.filename})`);
+          video.status = 'failed';
+          video.errorMessage = 'Processing was interrupted (server restarted). Click Reprocess to restart.';
+          db.upsertVideo(video);
+        }
+      }
+      const jobs = db.getJobs();
+      for (const job of jobs) {
+        if ((job.status === 'processing' || job.status === 'pending') && !this.activeJobs.has(job.videoId)) {
+          job.status = 'failed';
+          job.error = 'Server restarted during processing';
+          job.currentStep = 'Server restarted. Ready to reprocess.';
+          db.upsertJob(job);
+        }
+      }
+    } catch (e) {
+      console.warn('[JOB_QUEUE] Could not recover interrupted jobs on startup:', e);
+    }
   }
 
   public cancelJob(jobIdOrVideoId: string): boolean {
@@ -49,13 +83,22 @@ class JobQueueService extends EventEmitter {
       this.cancelledVideoIds.add(videoId);
       this.activeJobs.delete(videoId);
       ffmpegService.killProcesses(videoId);
-    }
 
-    if (job) {
-      this.appendJobLog(job.id, '⛔ Processing was cancelled by user.', {
+      // Cancel all active jobs for this video
+      const allJobs = db.getJobs(videoId);
+      for (const j of allJobs) {
+        this.updateJob(j.id, {
+          status: 'cancelled',
+          currentStep: 'Processing cancelled by user',
+        });
+        this.appendJobLog(j.id, '⛔ Processing was cancelled by user.');
+      }
+    } else if (job) {
+      this.updateJob(job.id, {
         status: 'cancelled',
         currentStep: 'Processing cancelled by user',
       });
+      this.appendJobLog(job.id, '⛔ Processing was cancelled by user.');
     }
 
     if (videoId && !this.isDeleted(videoId)) {
@@ -63,7 +106,7 @@ class JobQueueService extends EventEmitter {
       if (video && video.status !== 'indexed') {
         video.status = 'cancelled';
         video.errorMessage = 'Processing cancelled by user';
-        this.safeUpsertVideo(video);
+        db.upsertVideo(video);
       }
     }
 
@@ -92,7 +135,38 @@ class JobQueueService extends EventEmitter {
   }
 
   public isCancelled(videoId: string): boolean {
-    return this.cancelledVideoIds.has(videoId) || this.deletedVideoIds.has(videoId);
+    if (!videoId) return false;
+    if (this.cancelledVideoIds.has(videoId) || this.deletedVideoIds.has(videoId)) {
+      return true;
+    }
+    // Verify persistent state directly from DB (persists across Next.js worker threads and hot reloads)
+    const video = db.getVideo(videoId);
+    if (!video || video.status === 'cancelled') {
+      this.cancelledVideoIds.add(videoId);
+      return true;
+    }
+    const jobs = db.getJobs(videoId);
+    if (jobs.length > 0 && jobs.every((j) => j.status === 'cancelled')) {
+      this.cancelledVideoIds.add(videoId);
+      return true;
+    }
+    return false;
+  }
+
+  public cancelAllJobs(): void {
+    console.log('[JOB_QUEUE] Cancelling all active video pipelines and jobs.');
+    const jobs = db.getJobs();
+    for (const job of jobs) {
+      if (job.status === 'pending' || job.status === 'processing') {
+        this.cancelJob(job.id);
+      }
+    }
+    const videos = db.getVideos();
+    for (const video of videos) {
+      if (video.status === 'pending' || video.status === 'processing') {
+        this.cancelJob(video.id);
+      }
+    }
   }
 
   public isDeleted(videoId: string): boolean {
@@ -100,7 +174,10 @@ class JobQueueService extends EventEmitter {
   }
 
   public safeUpsertVideo(video: Video): void {
-    if (this.isCancelled(video.id) || this.isDeleted(video.id)) {
+    if (this.isDeleted(video.id)) {
+      return;
+    }
+    if (this.isCancelled(video.id) && video.status !== 'cancelled') {
       return;
     }
     // Verify video actually still exists in store (prevent resurrecting deleted videos)
@@ -403,6 +480,7 @@ class JobQueueService extends EventEmitter {
           videoTitle: video.filename || video.originalName,
           minDuration: 6,
           maxDuration: 120,
+          checkCancelled: () => this.isCancelled(videoId),
           onProgress: (stepMsg, pct) => {
             if (this.isCancelled(videoId)) return;
             this.appendJobLog(job.id, `🤖 [Gemini AI] ${stepMsg}`, {
@@ -578,7 +656,7 @@ class JobQueueService extends EventEmitter {
 
       console.log(`[INDEX_FINALIZATION] Completed successfully for video ${video.id}`);
     } catch (err: any) {
-      if (this.isCancelled(videoId) || this.isDeleted(videoId)) {
+      if (this.isCancelled(videoId) || this.isDeleted(videoId) || err?.message === 'VIDEO_ANALYSIS_CANCELLED_BY_USER') {
         console.log(`[JOB_QUEUE] Pipeline aborted for video ${videoId} due to user cancellation or deletion.`);
         return;
       }

@@ -18,12 +18,14 @@ import {
   Play,
   Layers,
   ArrowRight,
-  ShieldCheck
+  ShieldCheck,
+  RotateCcw
 } from 'lucide-react';
 
 import { formatTime } from '@/components/VideoPlayer';
 import GroupSelectDropdown from '@/components/GroupSelectDropdown';
 import ProcessingLogsConsole from '@/components/ProcessingLogsConsole';
+import ConfirmModal from '@/components/ConfirmModal';
 
 export interface QueueItem {
   id: string; // client id or videoId
@@ -63,8 +65,30 @@ export default function BulkUploadQueueModal({
   const [isCreatingNewGroup, setIsCreatingNewGroup] = useState<boolean>(false);
   const [createGroupLoading, setCreateGroupLoading] = useState<boolean>(false);
   const [isBatchProcessing, setIsBatchProcessing] = useState<boolean>(false);
+  const [reprocessingIds, setReprocessingIds] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isBatchCancelledRef = useRef<boolean>(false);
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const queueRef = useRef<QueueItem[]>(queue);
+  useEffect(() => {
+    queueRef.current = queue;
+  }, [queue]);
+  const [confirmConfig, setConfirmConfig] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmText?: string;
+    cancelText?: string;
+    variant?: 'danger' | 'warning' | 'info';
+    iconType?: 'trash' | 'stop' | 'warning' | 'refresh';
+    onConfirm: () => void | Promise<void>;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    variant: 'warning',
+    onConfirm: () => {},
+  });
 
   useEffect(() => {
     setLocalGroups(groups);
@@ -98,8 +122,9 @@ export default function BulkUploadQueueModal({
           const jobMap = new Map((jobs || []).map((j: any) => [j.videoId, j]));
           const videoMap = new Map((videos || []).map((v: any) => [v.id, v]));
 
-          setQueue((prevQueue) =>
-            prevQueue.map((item) => {
+          setQueue((prevQueue) => {
+            // 1. Update existing items in queue with live server status
+            const updatedExisting = prevQueue.map((item) => {
               if (!item.videoId) return item;
               const remoteVideo: any = videoMap.get(item.videoId);
               const remoteJob: any = jobMap.get(item.videoId);
@@ -137,8 +162,55 @@ export default function BulkUploadQueueModal({
                 logs: remoteJob?.logs || item.logs || [],
                 error: updatedError,
               };
-            })
-          );
+            });
+
+            // 2. Discover videos on the server that are active/processing/stuck/interrupted
+            // so opening the modal immediately displays them for monitoring and reprocessing!
+            const existingVideoIds = new Set(
+              prevQueue.map((q) => q.videoId).filter(Boolean)
+            );
+            const discoveredServerItems: QueueItem[] = [];
+
+            (videos || []).forEach((v: any) => {
+              const remoteJob: any = jobMap.get(v.id);
+              const isRelevant =
+                v.status === 'processing' ||
+                v.status === 'pending' ||
+                remoteJob?.status === 'processing' ||
+                (v.status === 'failed' && (v.errorMessage?.includes('restarted') || v.errorMessage?.includes('interrupted')));
+
+              if (isRelevant && !existingVideoIds.has(v.id)) {
+                const job: any = remoteJob;
+                const sizeMB = v.sizeBytes ? (v.sizeBytes / (1024 * 1024)).toFixed(1) : '0';
+                discoveredServerItems.push({
+                  id: `server_${v.id}`,
+                  videoId: v.id,
+                  name: v.filename || v.originalName || 'Video',
+                  sizeMB,
+                  status: v.status as any,
+                  progress: job?.progress ?? v.processingProgress ?? (v.status === 'failed' ? 0 : 10),
+                  stage:
+                    job?.currentStep ||
+                    (v.status === 'processing'
+                      ? 'Processing video scenes (in progress)...'
+                      : v.status === 'failed'
+                      ? (v.errorMessage || 'Processing interrupted. Click Reprocess to restart.')
+                      : 'Waiting in queue'),
+                  jobId: job?.id,
+                  groupId: v.groupId,
+                  groupName: v.groupName,
+                  logs: job?.logs || [],
+                  error: v.errorMessage || job?.error,
+                });
+              }
+            });
+
+            if (discoveredServerItems.length === 0) {
+              return updatedExisting;
+            }
+
+            return [...updatedExisting, ...discoveredServerItems];
+          });
         }
       } catch (err) {
         console.error('Queue poll error:', err);
@@ -248,6 +320,10 @@ export default function BulkUploadQueueModal({
 
   const uploadItem = async (item: QueueItem): Promise<void> => {
     if (!item.file) return;
+    if (isBatchCancelledRef.current) return;
+
+    const controller = new AbortController();
+    abortControllersRef.current.set(item.id, controller);
 
     setQueue((prev) =>
       prev.map((q) =>
@@ -273,11 +349,22 @@ export default function BulkUploadQueueModal({
       const res = await fetch('/api/videos/upload', {
         method: 'POST',
         body: formData,
+        signal: controller.signal,
       });
 
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error || 'Upload failed');
+      }
+
+      abortControllersRef.current.delete(item.id);
+
+      // If the batch or item was cancelled while upload was finishing, cancel backend processing immediately!
+      if (isBatchCancelledRef.current) {
+        if (data.video?.id) {
+          fetch(`/api/jobs/${data.video.id}/cancel`, { method: 'POST' }).catch(() => {});
+        }
+        return;
       }
 
       const isFailed = data.video?.status === 'failed';
@@ -303,6 +390,17 @@ export default function BulkUploadQueueModal({
       if (onUploadSuccess) onUploadSuccess();
       if (onRefreshGroups) onRefreshGroups();
     } catch (err: any) {
+      abortControllersRef.current.delete(item.id);
+      if (err.name === 'AbortError') {
+        setQueue((prev) =>
+          prev.map((q) =>
+            q.id === item.id
+              ? { ...q, status: 'cancelled', stage: 'Upload cancelled by user' }
+              : q
+          )
+        );
+        return;
+      }
       setQueue((prev) =>
         prev.map((q) =>
           q.id === item.id
@@ -329,45 +427,137 @@ export default function BulkUploadQueueModal({
     setIsBatchProcessing(false);
   };
 
-  const stopQueue = async () => {
+  const executeStopQueue = async () => {
     isBatchCancelledRef.current = true;
     setIsBatchProcessing(false);
 
-    // Cancel all items currently uploading or processing
-    const activeItems = queue.filter(
-      (item) => item.status === 'uploading' || item.status === 'processing'
+    // 1. Abort all in-flight upload fetch requests immediately
+    abortControllersRef.current.forEach((ctrl) => {
+      try { ctrl.abort(); } catch {}
+    });
+    abortControllersRef.current.clear();
+
+    // 2. Send global cancel to backend so any active Gemini processing terminates immediately
+    try {
+      await fetch('/api/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'cancel-all' }),
+      });
+    } catch {}
+
+    // 3. Stop and cancel all specific active items on backend
+    const currentQueue = queueRef.current;
+    await Promise.all(
+      currentQueue.map(async (item) => {
+        const targetId = item.videoId || item.jobId;
+        if (targetId) {
+          try {
+            await fetch(`/api/jobs/${targetId}/cancel`, { method: 'POST' });
+          } catch {}
+        }
+      })
     );
 
-    for (const item of activeItems) {
-      await handleCancel(item);
-    }
+    setQueue((prev) =>
+      prev.map((q) =>
+        q.status === 'uploading' || q.status === 'processing' || q.status === 'queued'
+          ? { ...q, status: 'cancelled', stage: 'Processing stopped by user' }
+          : q
+      )
+    );
+
+    if (onUploadSuccess) onUploadSuccess();
   };
 
-  const deleteEntireQueue = async () => {
-    if (queue.length === 0) return;
-    if (!confirm('Are you sure you want to stop and delete all videos from this queue?')) {
-      return;
-    }
+  const promptStopQueue = () => {
+    setConfirmConfig({
+      isOpen: true,
+      title: 'Stop Queue Processing?',
+      message: 'This will immediately abort current uploads and stop background video analysis for all active items in this queue.',
+      confirmText: 'Yes, Stop Processing',
+      cancelText: 'Keep Processing',
+      variant: 'warning',
+      iconType: 'stop',
+      onConfirm: async () => {
+        await executeStopQueue();
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
+  };
+
+  const executeDeleteEntireQueue = async () => {
+    const currentQueue = queueRef.current;
+    if (currentQueue.length === 0) return;
 
     isBatchCancelledRef.current = true;
     setIsBatchProcessing(false);
 
-    // Cancel and delete all items
-    for (const item of queue) {
-      const targetId = item.jobId || item.videoId;
-      if (targetId) {
-        fetch(`/api/jobs/${targetId}/cancel`, { method: 'POST' }).catch(() => {});
-        if (item.jobId) fetch(`/api/jobs/${item.jobId}`, { method: 'DELETE' }).catch(() => {});
-        if (item.videoId) fetch(`/api/videos/${item.videoId}`, { method: 'DELETE' }).catch(() => {});
-      }
-    }
+    // 1. Abort all in-flight upload requests immediately
+    abortControllersRef.current.forEach((ctrl) => {
+      try { ctrl.abort(); } catch {}
+    });
+    abortControllersRef.current.clear();
+
+    // 2. Cancel all backend pipelines immediately
+    try {
+      await fetch('/api/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'cancel-all' }),
+      });
+    } catch {}
+
+    // 3. Cancel and delete all items on server in parallel
+    await Promise.all(
+      currentQueue.map(async (item) => {
+        const videoId = item.videoId;
+        const jobId = item.jobId;
+
+        if (videoId) {
+          try {
+            await fetch(`/api/videos/${videoId}`, { method: 'DELETE' });
+          } catch {}
+        } else if (jobId) {
+          try {
+            await fetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' });
+            await fetch(`/api/jobs/${jobId}`, { method: 'DELETE' });
+          } catch {}
+        }
+      })
+    );
 
     setQueue([]);
     if (onUploadSuccess) onUploadSuccess();
   };
 
-  const handleCancel = async (item: QueueItem) => {
-    const targetId = item.jobId || item.videoId;
+  const promptDeleteEntireQueue = () => {
+    if (queue.length === 0) return;
+    setConfirmConfig({
+      isOpen: true,
+      title: 'Delete Entire Upload Queue?',
+      message: 'This will stop all running queues, abort in-flight uploads, and permanently delete all queued videos, thumbnails, and indexing data from the system.',
+      confirmText: 'Yes, Delete All',
+      cancelText: 'Cancel',
+      variant: 'danger',
+      iconType: 'trash',
+      onConfirm: async () => {
+        await executeDeleteEntireQueue();
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
+  };
+
+  const executeCancel = async (item: QueueItem) => {
+    // 1. Abort in-flight upload fetch if active
+    const ctrl = abortControllersRef.current.get(item.id);
+    if (ctrl) {
+      try { ctrl.abort(); } catch {}
+      abortControllersRef.current.delete(item.id);
+    }
+
+    // 2. Cancel on backend
+    const targetId = item.videoId || item.jobId;
     if (targetId) {
       try {
         await fetch(`/api/jobs/${targetId}/cancel`, { method: 'POST' });
@@ -383,18 +573,127 @@ export default function BulkUploadQueueModal({
           : q
       )
     );
+    if (onUploadSuccess) onUploadSuccess();
+  };
+
+  const promptCancelItem = (item: QueueItem) => {
+    if (item.status === 'processing' || item.status === 'uploading') {
+      setConfirmConfig({
+        isOpen: true,
+        title: `Cancel Processing for "${item.name}"?`,
+        message: 'Are you sure you want to stop processing this video? Any partial FFmpeg transcode and scene analysis will be terminated immediately.',
+        confirmText: 'Yes, Cancel Processing',
+        cancelText: 'Keep Running',
+        variant: 'warning',
+        iconType: 'stop',
+        onConfirm: async () => {
+          await executeCancel(item);
+          setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+        },
+      });
+    } else {
+      executeCancel(item);
+    }
   };
 
   const handleRemove = async (item: QueueItem) => {
-    // If it's already on server, cancel and delete if failed or cancelled
-    if (item.jobId) {
-      fetch(`/api/jobs/${item.jobId}`, { method: 'DELETE' }).catch(() => {});
+    // Abort if currently uploading
+    const ctrl = abortControllersRef.current.get(item.id);
+    if (ctrl) {
+      try { ctrl.abort(); } catch {}
+      abortControllersRef.current.delete(item.id);
     }
-    if (item.videoId && (item.status === 'cancelled' || item.status === 'failed')) {
-      fetch(`/api/videos/${item.videoId}`, { method: 'DELETE' }).catch(() => {});
+
+    if (item.videoId) {
+      try {
+        await fetch(`/api/videos/${item.videoId}`, { method: 'DELETE' });
+      } catch {}
+    } else if (item.jobId) {
+      try {
+        await fetch(`/api/jobs/${item.jobId}/cancel`, { method: 'POST' });
+        await fetch(`/api/jobs/${item.jobId}`, { method: 'DELETE' });
+      } catch {}
     }
 
     setQueue((prev) => prev.filter((q) => q.id !== item.id));
+    if (onUploadSuccess) onUploadSuccess();
+  };
+
+  const handleReprocessQueueItem = async (item: QueueItem) => {
+    if (!item.videoId) return;
+    const vId = item.videoId;
+    setReprocessingIds((prev) => new Set(prev).add(vId));
+    setQueue((prev) =>
+      prev.map((q) =>
+        q.videoId === vId || q.id === item.id
+          ? {
+              ...q,
+              status: 'processing',
+              stage: 'Restarting video indexing pipeline...',
+              progress: 5,
+              error: undefined,
+            }
+          : q
+      )
+    );
+
+    try {
+      const res = await fetch(`/api/videos/${vId}/reindex`, { method: 'POST' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to reprocess video');
+      }
+      if (onUploadSuccess) onUploadSuccess();
+    } catch (err: any) {
+      console.error('Failed to reprocess item in queue:', err);
+      setQueue((prev) =>
+        prev.map((q) =>
+          q.videoId === vId || q.id === item.id
+            ? {
+                ...q,
+                status: 'failed',
+                error: err.message,
+                stage: `Reprocess failed: ${err.message}`,
+              }
+            : q
+        )
+      );
+    } finally {
+      setReprocessingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(vId);
+        return next;
+      });
+    }
+  };
+
+  const handleReprocessAllEligible = async () => {
+    const eligible = queue.filter(
+      (q) => q.videoId && (q.status === 'processing' || q.status === 'failed' || q.status === 'cancelled')
+    );
+    for (const item of eligible) {
+      await handleReprocessQueueItem(item);
+    }
+  };
+
+  const promptRemoveItem = (item: QueueItem) => {
+    if (item.status === 'processing' || item.status === 'uploading' || item.videoId || item.jobId) {
+      setConfirmConfig({
+        isOpen: true,
+        title: `Remove "${item.name}"?`,
+        message: 'This will stop any active processing and remove this video and its associated data.',
+        confirmText: 'Remove Video',
+        cancelText: 'Keep Video',
+        variant: 'danger',
+        iconType: 'trash',
+        onConfirm: async () => {
+          await handleRemove(item);
+          setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+        },
+      });
+    } else {
+      handleRemove(item);
+    }
   };
 
   const clearCompletedOrCancelled = () => {
@@ -578,7 +877,7 @@ export default function BulkUploadQueueModal({
                   {(isBatchProcessing || processingCount > 0) && (
                     <button
                       type="button"
-                      onClick={stopQueue}
+                      onClick={promptStopQueue}
                       className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 hover:text-red-200 border border-red-500/30 text-xs font-semibold transition-all cursor-pointer"
                     >
                       <Square className="w-3 h-3 text-red-400" />
@@ -588,13 +887,25 @@ export default function BulkUploadQueueModal({
 
                   <button
                     type="button"
-                    onClick={deleteEntireQueue}
+                    onClick={promptDeleteEntireQueue}
                     className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-slate-800/80 hover:bg-red-500/15 hover:text-red-400 text-slate-400 text-xs transition-colors border border-slate-700/80 cursor-pointer"
                     title="Stop all and clear entire queue"
                   >
                     <Trash2 className="w-3 h-3" />
                     <span>Delete Queue</span>
                   </button>
+
+                  {queue.some((q) => q.videoId && (q.status === 'processing' || q.status === 'failed' || q.status === 'cancelled')) && (
+                    <button
+                      type="button"
+                      onClick={handleReprocessAllEligible}
+                      className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 hover:text-amber-200 border border-amber-500/30 text-xs font-semibold transition-all cursor-pointer"
+                      title="Restart all interrupted, failed, or processing items"
+                    >
+                      <RotateCcw className="w-3 h-3 text-amber-400" />
+                      <span>Reprocess All</span>
+                    </button>
+                  )}
 
                   {(completedCount > 0 || queue.some((q) => q.status === 'cancelled')) && (
                     <button
@@ -684,10 +995,24 @@ export default function BulkUploadQueueModal({
                         </span>
                       )}
 
+                      {/* Reprocess button for processing, failed, or cancelled videos */}
+                      {item.videoId && (item.status === 'processing' || item.status === 'failed' || item.status === 'cancelled') && (
+                        <button
+                          type="button"
+                          onClick={() => handleReprocessQueueItem(item)}
+                          disabled={reprocessingIds.has(item.videoId)}
+                          className="flex items-center space-x-1 px-2.5 py-1 rounded-md bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white text-[11px] font-semibold border border-amber-500/30 transition-all cursor-pointer shadow-sm disabled:opacity-50"
+                          title="Restart AI indexing pipeline for this video"
+                        >
+                          <RotateCcw className={`w-3 h-3 ${reprocessingIds.has(item.videoId) ? 'animate-spin' : ''}`} />
+                          <span>Reprocess</span>
+                        </button>
+                      )}
+
                       {/* Cancel button if active */}
                       {(item.status === 'processing' || item.status === 'uploading' || item.status === 'queued') && (
                         <button
-                          onClick={() => handleCancel(item)}
+                          onClick={() => promptCancelItem(item)}
                           className="flex items-center space-x-1 px-2.5 py-1 rounded-md bg-slate-800 hover:bg-red-500/20 hover:text-red-400 text-slate-400 text-[11px] transition-colors border border-slate-700"
                           title="Cancel processing"
                         >
@@ -709,7 +1034,7 @@ export default function BulkUploadQueueModal({
 
                       {/* Remove button */}
                       <button
-                        onClick={() => handleRemove(item)}
+                        onClick={() => promptRemoveItem(item)}
                         className="p-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
                         title="Remove from queue"
                       >
@@ -778,7 +1103,7 @@ export default function BulkUploadQueueModal({
             {queue.length > 0 && (
               <button
                 type="button"
-                onClick={deleteEntireQueue}
+                onClick={promptDeleteEntireQueue}
                 className="px-3.5 py-2.5 rounded-xl bg-slate-900 hover:bg-red-500/20 hover:text-red-300 text-slate-400 text-xs font-semibold border border-slate-800 hover:border-red-500/30 transition-all flex items-center space-x-1.5 cursor-pointer"
               >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -789,7 +1114,7 @@ export default function BulkUploadQueueModal({
             {(isBatchProcessing || processingCount > 0) && (
               <button
                 type="button"
-                onClick={stopQueue}
+                onClick={promptStopQueue}
                 className="px-4 py-2.5 rounded-xl bg-red-600/20 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/30 text-xs font-semibold shadow-md transition-all flex items-center space-x-1.5 cursor-pointer"
               >
                 <Square className="w-3.5 h-3.5" />
@@ -817,6 +1142,19 @@ export default function BulkUploadQueueModal({
           </div>
         </div>
       </div>
+
+      {/* Custom Confirmation Modal */}
+      <ConfirmModal
+        isOpen={confirmConfig.isOpen}
+        title={confirmConfig.title}
+        message={confirmConfig.message}
+        confirmText={confirmConfig.confirmText}
+        cancelText={confirmConfig.cancelText}
+        variant={confirmConfig.variant}
+        iconType={confirmConfig.iconType}
+        onConfirm={confirmConfig.onConfirm}
+        onClose={() => setConfirmConfig((prev) => ({ ...prev, isOpen: false }))}
+      />
     </div>
   );
 }

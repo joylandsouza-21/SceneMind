@@ -28,7 +28,7 @@ export class AiConfigService {
    */
   public getDefaultConfig(taskType: TaskType): AiModelConfig {
     const envGeminiKey = process.env.GEMINI_API_KEY || '';
-    const envGeminiModel = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+    const envGeminiModel = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
     const envEmbeddingModel = process.env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001';
 
     switch (taskType) {
@@ -360,7 +360,7 @@ export class AiConfigService {
     if (provider === 'gemini') {
       if (!apiKey) throw new Error('Gemini API key is required.');
       const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: modelName || 'gemini-3.6-flash' });
+      const model = genAI.getGenerativeModel({ model: modelName || 'gemini-3.8-flash' });
       const res = await model.generateContent(testPrompt);
       const text = res.response.text();
       return {

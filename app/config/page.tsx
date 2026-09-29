@@ -34,7 +34,7 @@ const DEFAULT_CONFIGS: ConfigState = {
     id: 'video_processing',
     taskType: 'video_processing',
     provider: 'gemini',
-    modelName: 'gemini-3.6-flash',
+    modelName: 'gemini-3.8-flash',
     apiKey: '',
     temperature: 0.2,
     isActive: true,
@@ -54,7 +54,7 @@ const DEFAULT_CONFIGS: ConfigState = {
     id: 'semantic_search',
     taskType: 'semantic_search',
     provider: 'gemini',
-    modelName: 'gemini-3.6-flash',
+    modelName: 'gemini-3.8-flash',
     apiKey: '',
     temperature: 0.2,
     isActive: true,
@@ -64,7 +64,7 @@ const DEFAULT_CONFIGS: ConfigState = {
     id: 'timestamp_verification',
     taskType: 'timestamp_verification',
     provider: 'gemini',
-    modelName: 'gemini-3.6-flash',
+    modelName: 'gemini-3.8-flash',
     apiKey: '',
     temperature: 0.1,
     isActive: true,
@@ -76,8 +76,8 @@ const DEFAULT_CONFIGS: ConfigState = {
 const DEFAULT_PROVIDER_MODELS: Record<ModelProvider, { embedding: string; generation: string; suggestions: string[] }> = {
   gemini: {
     embedding: 'gemini-embedding-001',
-    generation: 'gemini-3.6-flash',
-    suggestions: ['gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-embedding-001', 'text-embedding-004'],
+    generation: 'gemini-3.8-flash',
+    suggestions: ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-embedding-001', 'text-embedding-004'],
   },
   anthropic: {
     embedding: 'claude-3-5-haiku-20241022',
@@ -415,7 +415,7 @@ export default function ConfigPage() {
               <div className="p-4 rounded-xl bg-blue-950/30 border border-blue-800/40 text-blue-200 text-xs flex items-center space-x-3 mb-6">
                 <ShieldCheck className="w-5 h-5 text-blue-400 flex-shrink-0" />
                 <div>
-                  <strong className="text-blue-300">Google Gemini Multimodal Video Engine:</strong> Video processing requires Gemini's File API to perform native frame-level visual reasoning. Gemini models like <code className="bg-blue-900/40 px-1 py-0.5 rounded">gemini-3.6-flash</code> or <code className="bg-blue-900/40 px-1 py-0.5 rounded">gemini-2.5-flash</code> are supported.
+                  <strong className="text-blue-300">Google Gemini Multimodal Video Engine:</strong> Video processing requires Gemini's File API to perform native frame-level visual reasoning. Gemini models like <code className="bg-blue-900/40 px-1 py-0.5 rounded">gemini-3.8-flash</code> or <code className="bg-blue-900/40 px-1 py-0.5 rounded">gemini-2.5-flash</code> are supported.
                 </div>
               </div>
 
@@ -441,14 +441,14 @@ export default function ConfigPage() {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. gemini-3.6-flash or gemini-2.5-flash"
+                    placeholder="e.g. gemini-3.8-flash or gemini-2.5-flash"
                     value={configs.video_processing.modelName}
                     onChange={(e) => handleConfigChange('video_processing', 'modelName', e.target.value)}
                     className="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-sm focus:border-blue-500 focus:outline-none"
                   />
                   {/* Suggestion Badges */}
                   <div className="flex flex-wrap gap-1.5 mt-2">
-                    {['gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-1.5-pro'].map((sug) => (
+                    {['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-1.5-pro'].map((sug) => (
                       <button
                         key={sug}
                         type="button"

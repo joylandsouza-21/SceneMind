@@ -38,7 +38,7 @@ export class TimestampVerificationService {
       try {
         const genAI = new GoogleGenerativeAI(config.apiKey);
         const model = genAI.getGenerativeModel({
-          model: config.modelName || 'gemini-3.6-flash',
+          model: config.modelName || 'gemini-3.8-flash',
           systemInstruction: TIMESTAMP_VERIFICATION_SYSTEM_PROMPT,
           generationConfig: {
             responseMimeType: 'application/json',
