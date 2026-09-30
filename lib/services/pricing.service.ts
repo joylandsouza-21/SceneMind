@@ -5,20 +5,37 @@ import { v4 as uuidv4 } from 'uuid';
 export interface PricingRates {
   geminiFlashInputPerMillion: number;
   geminiFlashOutputPerMillion: number;
+  geminiFlashLongContextInputPerMillion: number;
+  geminiFlashLongContextOutputPerMillion: number;
+  geminiProInputPerMillion: number;
+  geminiProOutputPerMillion: number;
+  geminiProLongContextInputPerMillion: number;
+  geminiProLongContextOutputPerMillion: number;
   geminiEmbeddingPerMillion: number;
-  videoMultimodalPerSecond: number;
+  videoTokensPerSecond: number;
   ffmpegComputePerMinute: number;
 }
 
 export const DEFAULT_PRICING: PricingRates = {
   geminiFlashInputPerMillion: 0.075,
   geminiFlashOutputPerMillion: 0.30,
+  geminiFlashLongContextInputPerMillion: 0.15,
+  geminiFlashLongContextOutputPerMillion: 0.60,
+  geminiProInputPerMillion: 1.25,
+  geminiProOutputPerMillion: 5.00,
+  geminiProLongContextInputPerMillion: 2.50,
+  geminiProLongContextOutputPerMillion: 10.00,
   geminiEmbeddingPerMillion: 0.02,
-  videoMultimodalPerSecond: 0.00003, // ~$0.0018 per minute of processed video
+  videoTokensPerSecond: 290, // ~258 video frame tokens (1fps) + ~32 audio tokens
   ffmpegComputePerMinute: 0.0004,
 };
 
-export const MODEL_PRICING_RATES: Record<string, { inputPerMillion: number; outputPerMillion: number }> = {
+export const MODEL_PRICING_RATES: Record<string, { 
+  inputPerMillion: number; 
+  outputPerMillion: number;
+  longContextInputPerMillion?: number;
+  longContextOutputPerMillion?: number;
+}> = {
   // Anthropic Claude
   'claude-3-5-sonnet-20241022': { inputPerMillion: 3.0, outputPerMillion: 15.0 },
   'claude-3-5-sonnet-20240620': { inputPerMillion: 3.0, outputPerMillion: 15.0 },
@@ -30,15 +47,56 @@ export const MODEL_PRICING_RATES: Record<string, { inputPerMillion: number; outp
   'gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.60 },
   'o1-mini': { inputPerMillion: 3.0, outputPerMillion: 12.0 },
   'o3-mini': { inputPerMillion: 1.1, outputPerMillion: 4.4 },
-  // Google Gemini
-  'gemini-3.8-flash': { inputPerMillion: 0.10, outputPerMillion: 0.40 },
-  'gemini-3.6-flash': { inputPerMillion: 0.10, outputPerMillion: 0.40 },
-  'gemini-2.5-flash': { inputPerMillion: 0.10, outputPerMillion: 0.40 },
-  'gemini-2.0-flash': { inputPerMillion: 0.10, outputPerMillion: 0.40 },
+  // Google Gemini (with official >128k long-context tiers)
+  'gemini-3.8-flash': { 
+    inputPerMillion: 0.10, 
+    outputPerMillion: 0.40,
+    longContextInputPerMillion: 0.15,
+    longContextOutputPerMillion: 0.60
+  },
+  'gemini-3.6-flash': { 
+    inputPerMillion: 0.10, 
+    outputPerMillion: 0.40,
+    longContextInputPerMillion: 0.15,
+    longContextOutputPerMillion: 0.60
+  },
+  'gemini-2.5-flash': { 
+    inputPerMillion: 0.10, 
+    outputPerMillion: 0.40,
+    longContextInputPerMillion: 0.15,
+    longContextOutputPerMillion: 0.60
+  },
+  'gemini-2.0-flash': { 
+    inputPerMillion: 0.10, 
+    outputPerMillion: 0.40,
+    longContextInputPerMillion: 0.15,
+    longContextOutputPerMillion: 0.60
+  },
   'gemini-2.0-flash-exp': { inputPerMillion: 0.0, outputPerMillion: 0.0 },
-  'gemini-1.5-flash': { inputPerMillion: 0.075, outputPerMillion: 0.30 },
-  'gemini-1.5-flash-8b': { inputPerMillion: 0.0375, outputPerMillion: 0.15 },
-  'gemini-1.5-pro': { inputPerMillion: 1.25, outputPerMillion: 5.00 },
+  'gemini-1.5-flash': { 
+    inputPerMillion: 0.075, 
+    outputPerMillion: 0.30,
+    longContextInputPerMillion: 0.15,
+    longContextOutputPerMillion: 0.60
+  },
+  'gemini-1.5-flash-8b': { 
+    inputPerMillion: 0.0375, 
+    outputPerMillion: 0.15,
+    longContextInputPerMillion: 0.075,
+    longContextOutputPerMillion: 0.30
+  },
+  'gemini-1.5-pro': { 
+    inputPerMillion: 1.25, 
+    outputPerMillion: 5.00,
+    longContextInputPerMillion: 2.50,
+    longContextOutputPerMillion: 10.00
+  },
+  'gemini-2.0-pro': { 
+    inputPerMillion: 1.25, 
+    outputPerMillion: 5.00,
+    longContextInputPerMillion: 2.50,
+    longContextOutputPerMillion: 10.00
+  },
   // Groq / Open Source
   'llama-3.3-70b-versatile': { inputPerMillion: 0.59, outputPerMillion: 0.79 },
   'llama-3.1-8b-instant': { inputPerMillion: 0.05, outputPerMillion: 0.08 },
@@ -65,36 +123,51 @@ export class PricingService {
 
   public calculateTextAiCost(model: string = '', inputTokens: number = 0, outputTokens: number = 0): number {
     const normalizedModel = (model || '').toLowerCase().trim();
+    const isLongContext = inputTokens > 128_000;
     
     // Find matching rate or fallback
     let rate = MODEL_PRICING_RATES[normalizedModel];
-    if (!rate) {
+    let inRate = rate?.inputPerMillion;
+    let outRate = rate?.outputPerMillion;
+
+    if (rate && isLongContext && rate.longContextInputPerMillion !== undefined) {
+      inRate = rate.longContextInputPerMillion;
+      outRate = rate.longContextOutputPerMillion ?? rate.outputPerMillion;
+    }
+
+    if (inRate === undefined || outRate === undefined) {
       if (normalizedModel.includes('sonnet')) {
-        rate = { inputPerMillion: 3.0, outputPerMillion: 15.0 };
+        inRate = 3.0;
+        outRate = 15.0;
       } else if (normalizedModel.includes('haiku')) {
-        rate = { inputPerMillion: 0.8, outputPerMillion: 4.0 };
+        inRate = 0.8;
+        outRate = 4.0;
       } else if (normalizedModel.includes('opus')) {
-        rate = { inputPerMillion: 15.0, outputPerMillion: 75.0 };
+        inRate = 15.0;
+        outRate = 75.0;
       } else if (normalizedModel.includes('gpt-4o-mini')) {
-        rate = { inputPerMillion: 0.15, outputPerMillion: 0.60 };
+        inRate = 0.15;
+        outRate = 0.60;
       } else if (normalizedModel.includes('gpt-4o')) {
-        rate = { inputPerMillion: 2.5, outputPerMillion: 10.0 };
-      } else if (normalizedModel.includes('1.5-pro') || normalizedModel.includes('2.0-pro')) {
-        rate = { inputPerMillion: 1.25, outputPerMillion: 5.00 };
+        inRate = 2.5;
+        outRate = 10.0;
+      } else if (normalizedModel.includes('1.5-pro') || normalizedModel.includes('2.0-pro') || normalizedModel.includes('pro')) {
+        inRate = isLongContext ? this.rates.geminiProLongContextInputPerMillion : this.rates.geminiProInputPerMillion;
+        outRate = isLongContext ? this.rates.geminiProLongContextOutputPerMillion : this.rates.geminiProOutputPerMillion;
       } else if (normalizedModel.includes('llama')) {
-        rate = { inputPerMillion: 0.59, outputPerMillion: 0.79 };
+        inRate = 0.59;
+        outRate = 0.79;
       } else if (normalizedModel.includes('ollama') || normalizedModel.includes('local')) {
-        rate = { inputPerMillion: 0.0, outputPerMillion: 0.0 };
+        inRate = 0.0;
+        outRate = 0.0;
       } else {
-        rate = {
-          inputPerMillion: this.rates.geminiFlashInputPerMillion,
-          outputPerMillion: this.rates.geminiFlashOutputPerMillion,
-        };
+        inRate = isLongContext ? this.rates.geminiFlashLongContextInputPerMillion : this.rates.geminiFlashInputPerMillion;
+        outRate = isLongContext ? this.rates.geminiFlashLongContextOutputPerMillion : this.rates.geminiFlashOutputPerMillion;
       }
     }
 
-    const inputCost = (inputTokens / 1_000_000) * rate.inputPerMillion;
-    const outputCost = (outputTokens / 1_000_000) * rate.outputPerMillion;
+    const inputCost = (inputTokens / 1_000_000) * inRate;
+    const outputCost = (outputTokens / 1_000_000) * outRate;
     return parseFloat((inputCost + outputCost).toFixed(6));
   }
 
@@ -112,10 +185,19 @@ export class PricingService {
     return parseFloat(cost.toFixed(6));
   }
 
-  public calculateVideoAnalysisCost(durationSeconds: number, inputTokens = 0, outputTokens = 0, model: string = 'gemini-2.0-flash'): number {
-    const baseDurationCost = durationSeconds * this.rates.videoMultimodalPerSecond;
-    const textCost = this.calculateTextAiCost(model, inputTokens, outputTokens);
-    return parseFloat((baseDurationCost + textCost).toFixed(6));
+  public calculateVideoAnalysisCost(
+    durationSeconds: number,
+    inputTokens = 0,
+    outputTokens = 0,
+    model: string = 'gemini-3.8-flash'
+  ): number {
+    // If inputTokens is provided (from Gemini usageMetadata or estimator), use it directly.
+    // If not provided, calculate multimodal tokens: 258 video frames/sec + 32 audio tokens/sec = 290 tokens/sec
+    const effectiveInputTokens = inputTokens > 0
+      ? inputTokens
+      : Math.round(durationSeconds * this.rates.videoTokensPerSecond) + 500;
+
+    return this.calculateTextAiCost(model, effectiveInputTokens, outputTokens);
   }
 
   public recordOperationCost(params: {

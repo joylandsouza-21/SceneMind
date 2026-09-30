@@ -467,7 +467,7 @@ export default function VideosPage() {
                 Click to browse or drag & drop video here
               </p>
               <p className="text-xs text-slate-500 mt-1">
-                Supports MP4, MKV, MOV, WEBM, AVI (including long videos up to 2 hours)
+                Supports MP4, MKV, MOV, WEBM, AVI (any duration / unlimited length with automatic stream splitting)
               </p>
             </div>
             <div className="pt-1">
@@ -497,8 +497,8 @@ export default function VideosPage() {
           <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 flex items-center space-x-2.5">
             <Clock className="w-4 h-4 text-blue-400 shrink-0" />
             <div>
-              <span className="text-slate-500 block text-[11px]">Max Video Length</span>
-              <span className="font-semibold text-slate-200">Up to 2 hours</span>
+              <span className="text-slate-500 block text-[11px]">Video Duration</span>
+              <span className="font-semibold text-slate-200">Any Length (Auto-Split)</span>
             </div>
           </div>
           <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 flex items-center space-x-2.5">

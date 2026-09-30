@@ -43,8 +43,12 @@ class JobQueueService extends EventEmitter {
   public recoverInterruptedJobsOnStartup(): void {
     try {
       const videos = db.getVideos();
+      const stagnantThresholdMs = 120_000; // Only flag as crashed if inactive for > 2 minutes
+      const now = Date.now();
+
       for (const video of videos) {
-        if ((video.status === 'processing' || video.status === 'pending') && !this.activeJobs.has(video.id)) {
+        const timeSinceUpdate = now - new Date(video.updatedAt || video.createdAt).getTime();
+        if ((video.status === 'processing' || video.status === 'pending') && !this.activeJobs.has(video.id) && timeSinceUpdate > stagnantThresholdMs) {
           console.log(`[JOB_QUEUE] Flagging interrupted video on startup: ${video.id} (${video.filename})`);
           video.status = 'failed';
           video.errorMessage = 'Processing was interrupted (server restarted). Click Reprocess to restart.';
@@ -53,7 +57,8 @@ class JobQueueService extends EventEmitter {
       }
       const jobs = db.getJobs();
       for (const job of jobs) {
-        if ((job.status === 'processing' || job.status === 'pending') && !this.activeJobs.has(job.videoId)) {
+        const timeSinceUpdate = now - new Date(job.updatedAt || job.createdAt).getTime();
+        if ((job.status === 'processing' || job.status === 'pending') && !this.activeJobs.has(job.videoId) && timeSinceUpdate > stagnantThresholdMs) {
           job.status = 'failed';
           job.error = 'Server restarted during processing';
           job.currentStep = 'Server restarted. Ready to reprocess.';
@@ -478,8 +483,8 @@ class JobQueueService extends EventEmitter {
         const analysis = await videoAnalysisService.analyzeVideo(currentAbsPath, video.duration, {
           videoId,
           videoTitle: video.filename || video.originalName,
-          minDuration: 6,
-          maxDuration: 120,
+          minDuration: 4,
+          maxDuration: 60,
           checkCancelled: () => this.isCancelled(videoId),
           onProgress: (stepMsg, pct) => {
             if (this.isCancelled(videoId)) return;

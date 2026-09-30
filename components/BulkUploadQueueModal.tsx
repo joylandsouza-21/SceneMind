@@ -858,7 +858,7 @@ export default function BulkUploadQueueModal({
             <div className="flex flex-wrap items-center gap-2.5 text-slate-400">
               <span>Max Size: <strong className="text-slate-200">2 GB / video</strong></span>
               <span>•</span>
-              <span>Max Duration: <strong className="text-slate-200">Up to 2 hours</strong></span>
+              <span>Duration: <strong className="text-slate-200">Any Length (Auto-Split)</strong></span>
               <span>•</span>
               <span>Project Storage: <strong className="text-slate-200">20 GB Limit</strong></span>
               <span>•</span>

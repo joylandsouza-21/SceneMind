@@ -51,8 +51,13 @@ export class TimestampVerificationService {
         const latencyMs = Date.now() - startTimeMs;
 
         const parsed = this.parseVerificationResponse(text, params.candidateStart, params.candidateEnd);
-        const inputTokens = Math.round(prompt.length / 4) + 120;
-        const outputTokens = Math.round(text.length / 4);
+        const usage = (response.response as any)?.usageMetadata;
+        const inputTokens = typeof usage?.promptTokenCount === 'number'
+          ? usage.promptTokenCount
+          : Math.round(prompt.length / 4) + 120;
+        const outputTokens = typeof usage?.candidatesTokenCount === 'number'
+          ? usage.candidatesTokenCount
+          : Math.round(text.length / 4);
         const estimatedCost = pricingService.calculateTextAiCost(config.modelName, inputTokens, outputTokens);
 
         pricingService.recordOperationCost({

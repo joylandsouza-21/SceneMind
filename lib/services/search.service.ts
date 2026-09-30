@@ -120,6 +120,9 @@ Respond ONLY with valid JSON in this exact structure:
 
       try {
         let textResult = '';
+        let inputTokens = 0;
+        let outputTokens = 0;
+
         if (config.provider === 'gemini') {
           const genAI = new GoogleGenerativeAI(config.apiKey);
           const model = genAI.getGenerativeModel({
@@ -131,6 +134,9 @@ Respond ONLY with valid JSON in this exact structure:
           });
           const res = await withAiRetry(() => model.generateContent(prompt));
           textResult = res.response.text();
+          const usage = (res.response as any)?.usageMetadata;
+          inputTokens = usage?.promptTokenCount ?? Math.ceil(prompt.length / 4);
+          outputTokens = usage?.candidatesTokenCount ?? Math.ceil(textResult.length / 4);
         } else if (config.provider === 'anthropic') {
           const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/v1/messages` : 'https://api.anthropic.com/v1/messages';
           const modelId = normalizeAnthropicModel(config.modelName, 'claude-3-5-haiku-20241022');
@@ -151,6 +157,8 @@ Respond ONLY with valid JSON in this exact structure:
           if (res.ok) {
             const data = await res.json();
             textResult = data.content?.[0]?.text || '';
+            inputTokens = data.usage?.input_tokens ?? Math.ceil(prompt.length / 4);
+            outputTokens = data.usage?.output_tokens ?? Math.ceil(textResult.length / 4);
           }
         }
 
@@ -163,11 +171,14 @@ Respond ONLY with valid JSON in this exact structure:
             : [trimmed];
 
           const latencyMs = Date.now() - startMs;
+          const modelUsed = config.modelName || config.provider;
+          const estimatedCost = pricingService.calculateTextAiCost(modelUsed, inputTokens, outputTokens);
+
           pricingService.recordOperationCost({
-            model: config.modelName || config.provider,
-            inputTokens: Math.ceil(prompt.length / 4),
-            outputTokens: Math.ceil(textResult.length / 4),
-            estimatedCost: 0.00005,
+            model: modelUsed,
+            inputTokens,
+            outputTokens,
+            estimatedCost,
             processingTimeMs: latencyMs,
             requestType: 'RERANKING',
           });
@@ -408,6 +419,9 @@ Respond ONLY with valid JSON array of evaluations:
 
       try {
         let textResult = '';
+        let inputTokens = 0;
+        let outputTokens = 0;
+
         if (config.provider === 'gemini') {
           const genAI = new GoogleGenerativeAI(config.apiKey);
           const model = genAI.getGenerativeModel({
@@ -419,6 +433,9 @@ Respond ONLY with valid JSON array of evaluations:
           });
           const res = await withAiRetry(() => model.generateContent(systemPrompt));
           textResult = res.response.text();
+          const usage = (res.response as any)?.usageMetadata;
+          inputTokens = usage?.promptTokenCount ?? Math.ceil(systemPrompt.length / 4);
+          outputTokens = usage?.candidatesTokenCount ?? Math.ceil(textResult.length / 4);
         } else if (config.provider === 'anthropic') {
           const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/v1/messages` : 'https://api.anthropic.com/v1/messages';
           const modelId = normalizeAnthropicModel(config.modelName, 'claude-3-5-haiku-20241022');
@@ -439,6 +456,8 @@ Respond ONLY with valid JSON array of evaluations:
           if (res.ok) {
             const data = await res.json();
             textResult = data.content?.[0]?.text || '';
+            inputTokens = data.usage?.input_tokens ?? Math.ceil(systemPrompt.length / 4);
+            outputTokens = data.usage?.output_tokens ?? Math.ceil(textResult.length / 4);
           }
         }
 
@@ -452,12 +471,15 @@ Respond ONLY with valid JSON array of evaluations:
           }
 
           const latencyMs = Date.now() - startMs;
+          const modelUsed = config.modelName || config.provider;
+          const estimatedCost = pricingService.calculateTextAiCost(modelUsed, inputTokens, outputTokens);
+
           pricingService.recordOperationCost({
             videoId: params.videoId,
-            model: config.modelName || config.provider,
-            inputTokens: Math.ceil(systemPrompt.length / 4),
-            outputTokens: Math.ceil(textResult.length / 4),
-            estimatedCost: 0.0001,
+            model: modelUsed,
+            inputTokens,
+            outputTokens,
+            estimatedCost,
             processingTimeMs: latencyMs,
             requestType: 'RERANKING',
           });

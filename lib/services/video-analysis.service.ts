@@ -3,6 +3,7 @@ import { GoogleAIFileManager } from '@google/generative-ai/server';
 import { VIDEO_ANALYSIS_SYSTEM_PROMPT, buildVideoAnalysisUserPrompt } from '../../prompts/video-analysis';
 import { pricingService } from './pricing.service';
 import { aiConfigService } from './ai-config.service';
+import { ffmpegService } from './ffmpeg.service';
 import { db } from '../db';
 import fs from 'fs';
 import path from 'path';
@@ -150,17 +151,37 @@ export class VideoAnalysisService {
 
     // If Gemini API Key is present, attempt live AI analysis
     if (config.apiKey && config.apiKey.trim() !== '') {
+      const activeModel = config.modelName || 'gemini-3.8-flash';
+      // For videos longer than 20 minutes (~1200s), activate Option B: Fast Stream Splitting.
+      // Slices the master video into ~20m lossless stream chunks to ensure fine-grained scenes
+      // across any video length (1 hr, 2 hr, 3+ hr) without exceeding Gemini's 8,192 token output ceiling.
+      if (durationSeconds > 1200) {
+        return await this.executeChunkedGeminiVideoAnalysis(
+          videoPath,
+          durationSeconds,
+          minDur,
+          maxDur,
+          config.apiKey.trim(),
+          activeModel,
+          options?.videoId,
+          options?.videoTitle,
+          options?.checkCancelled,
+          options?.onProgress
+        );
+      }
+
       const result = await this.executeGeminiVideoAnalysis(
         videoPath,
         durationSeconds,
         minDur,
         maxDur,
         config.apiKey.trim(),
-        config.modelName || 'gemini-2.0-flash',
+        activeModel,
         options?.videoId,
         options?.videoTitle,
         options?.checkCancelled,
-        options?.onProgress
+        options?.onProgress,
+        true
       );
       return result;
     }
@@ -181,7 +202,8 @@ export class VideoAnalysisService {
     videoId?: string,
     videoTitle?: string,
     checkCancelled?: () => boolean,
-    onProgress?: (step: string, percent?: number) => void
+    onProgress?: (step: string, percent?: number) => void,
+    recordCost: boolean = true
   ): Promise<VideoAnalysisResult> {
     const startTime = Date.now();
     const genAI = new GoogleGenerativeAI(apiKey);
@@ -324,19 +346,29 @@ export class VideoAnalysisService {
     // Parse and validate strict JSON
     const parsedScenes = this.parseAndValidateScenesJson(text, durationSeconds);
 
-    const inputTokens = Math.round(durationSeconds * 25) + 350;
-    const outputTokens = Math.round(text.length / 4);
-    const estimatedCost = pricingService.calculateVideoAnalysisCost(durationSeconds, inputTokens, outputTokens);
+    // Extract exact Google Gemini usage metadata directly from the API response
+    // Fall back to actual multimodal video token rate (258 frames + 32 audio = 290 tokens/sec)
+    const usage = (response.response as any)?.usageMetadata;
+    const inputTokens = typeof usage?.promptTokenCount === 'number'
+      ? usage.promptTokenCount
+      : Math.round(durationSeconds * 290) + 350;
+    const outputTokens = typeof usage?.candidatesTokenCount === 'number'
+      ? usage.candidatesTokenCount
+      : Math.round(text.length / 4);
 
-    pricingService.recordOperationCost({
-      videoId,
-      model: modelName,
-      inputTokens,
-      outputTokens,
-      estimatedCost,
-      processingTimeMs: latencyMs,
-      requestType: 'SCENE_ANALYSIS',
-    });
+    const estimatedCost = pricingService.calculateVideoAnalysisCost(durationSeconds, inputTokens, outputTokens, modelName);
+
+    if (recordCost) {
+      pricingService.recordOperationCost({
+        videoId,
+        model: modelName,
+        inputTokens,
+        outputTokens,
+        estimatedCost,
+        processingTimeMs: latencyMs,
+        requestType: 'SCENE_ANALYSIS',
+      });
+    }
 
     return {
       scenes: parsedScenes,
@@ -346,6 +378,197 @@ export class VideoAnalysisService {
       latencyMs,
       model: modelName,
       rawResponse: text,
+    };
+  }
+
+  /**
+   * Option B: Fast Stream Splitting Pipeline for Long Videos
+   * Uses lossless FFmpeg stream copy to divide long videos into ~16-minute segments,
+   * evaluates segments in bounded parallel, and seamlessly stitches scenes across master timestamps.
+   */
+  private async executeChunkedGeminiVideoAnalysis(
+    videoPath: string,
+    durationSeconds: number,
+    minDur: number,
+    maxDur: number,
+    apiKey: string,
+    modelName: string,
+    videoId?: string,
+    videoTitle?: string,
+    checkCancelled?: () => boolean,
+    onProgress?: (step: string, percent?: number) => void
+  ): Promise<VideoAnalysisResult> {
+    const startTime = Date.now();
+    // 20 minutes per chunk matches the 20-minute partition window (e.g. 60m -> 3 chunks, 40m -> 2 chunks)
+    const targetChunkDuration = 20 * 60; // 1200s (20 minutes)
+    const numChunks = Math.max(2, Math.ceil(durationSeconds / targetChunkDuration));
+    const chunkLength = durationSeconds / numChunks;
+
+    const chunkDefs: { index: number; start: number; end: number; duration: number }[] = [];
+    for (let i = 0; i < numChunks; i++) {
+      const start = i * chunkLength;
+      const end = i === numChunks - 1 ? durationSeconds : (i + 1) * chunkLength;
+      chunkDefs.push({
+        index: i + 1,
+        start,
+        end,
+        duration: end - start,
+      });
+    }
+
+    const initMsg = `Smart Stream Splitting activated for ${Math.round(durationSeconds / 60)}m video: partitioning into ${numChunks} parallel segments (~${Math.round(chunkLength / 60)}m each)...`;
+    console.log(`[VIDEO_ANALYSIS] ${initMsg}`);
+    if (onProgress) onProgress(initMsg, 35);
+
+    const tempDir = path.join(path.dirname(videoPath), '.chunks');
+    if (!fs.existsSync(tempDir)) {
+      try { fs.mkdirSync(tempDir, { recursive: true }); } catch {}
+    }
+
+    let completedChunks = 0;
+    const processChunk = async (chunk: typeof chunkDefs[0]) => {
+      if (await this.isJobCancelled(videoId, checkCancelled)) {
+        throw new Error('VIDEO_ANALYSIS_CANCELLED_BY_USER');
+      }
+
+      const chunkFilename = `chunk_${videoId || 'temp'}_p${chunk.index}_of_${numChunks}_${Date.now()}.mp4`;
+      const chunkPath = path.join(tempDir, chunkFilename);
+
+      try {
+        const startMin = (chunk.start / 60).toFixed(1);
+        const endMin = (chunk.end / 60).toFixed(1);
+        const splitMsg = `[Part ${chunk.index}/${numChunks}] Extracting lossless stream chunk (${startMin}m - ${endMin}m)...`;
+        console.log(`[VIDEO_ANALYSIS] ${splitMsg}`);
+        if (onProgress) onProgress(splitMsg, 36 + Math.round((chunk.index / numChunks) * 10));
+
+        await ffmpegService.extractStreamChunk(videoPath, chunk.start, chunk.duration, chunkPath);
+
+        if (await this.isJobCancelled(videoId, checkCancelled)) {
+          throw new Error('VIDEO_ANALYSIS_CANCELLED_BY_USER');
+        }
+
+        const chunkResult = await this.executeGeminiVideoAnalysis(
+          chunkPath,
+          chunk.duration,
+          minDur,
+          maxDur,
+          apiKey,
+          modelName,
+          videoId,
+          videoTitle ? `${videoTitle} [Part ${chunk.index}/${numChunks}]` : undefined,
+          checkCancelled,
+          (stepMsg) => {
+            if (onProgress) {
+              const basePct = 45 + Math.round((completedChunks / numChunks) * 40);
+              onProgress(`[Part ${chunk.index}/${numChunks}] ${stepMsg}`, Math.min(86, basePct));
+            }
+          },
+          false // skip individual cost recording
+        );
+
+        completedChunks++;
+        const finishMsg = `[Part ${chunk.index}/${numChunks}] Finished breakdown (${chunkResult.scenes.length} fine scenes detected).`;
+        console.log(`[VIDEO_ANALYSIS] ${finishMsg}`);
+        if (onProgress) {
+          onProgress(finishMsg, 45 + Math.round((completedChunks / numChunks) * 42));
+        }
+
+        // Offset detected scene timestamps by chunk.start so they match the master video
+        const offsetScenes = chunkResult.scenes.map((s) => ({
+          ...s,
+          startTime: Math.round((s.startTime + chunk.start) * 10) / 10,
+          endTime: Math.round(Math.min(durationSeconds, s.endTime + chunk.start) * 10) / 10,
+        }));
+
+        return {
+          scenes: offsetScenes,
+          inputTokens: chunkResult.inputTokens,
+          outputTokens: chunkResult.outputTokens,
+          rawResponse: chunkResult.rawResponse,
+        };
+      } finally {
+        if (fs.existsSync(chunkPath)) {
+          try { fs.unlinkSync(chunkPath); } catch {}
+        }
+      }
+    };
+
+    // Execute chunks with bounded concurrency (2 parallel chunks to balance speed and API rate limits)
+    const results: Array<{ scenes: RawDetectedScene[]; inputTokens: number; outputTokens: number; rawResponse?: string }> = [];
+    const concurrency = 2;
+    for (let i = 0; i < chunkDefs.length; i += concurrency) {
+      if (await this.isJobCancelled(videoId, checkCancelled)) {
+        throw new Error('VIDEO_ANALYSIS_CANCELLED_BY_USER');
+      }
+      const slice = chunkDefs.slice(i, i + concurrency);
+      const sliceResults = await Promise.all(slice.map(processChunk));
+      results.push(...sliceResults);
+    }
+
+    // Combine all scenes and sort chronologically
+    const allScenes: RawDetectedScene[] = [];
+    let totalIn = 0;
+    let totalOut = 0;
+    const rawResponses: string[] = [];
+
+    for (const r of results) {
+      allScenes.push(...r.scenes);
+      totalIn += r.inputTokens;
+      totalOut += r.outputTokens;
+      if (r.rawResponse) rawResponses.push(r.rawResponse);
+    }
+
+    allScenes.sort((a, b) => a.startTime - b.startTime);
+
+    // Smooth boundary seams between chunks (ensure no gaps or overlapping scenes)
+    for (let i = 0; i < allScenes.length - 1; i++) {
+      if (allScenes[i].endTime < allScenes[i + 1].startTime) {
+        // Close micro-gap by extending previous scene
+        allScenes[i].endTime = allScenes[i + 1].startTime;
+      } else if (allScenes[i].endTime > allScenes[i + 1].startTime) {
+        // Clamp overlap
+        allScenes[i].endTime = allScenes[i + 1].startTime;
+      }
+    }
+    if (allScenes.length > 0) {
+      allScenes[allScenes.length - 1].endTime = Math.min(
+        durationSeconds,
+        Math.max(allScenes[allScenes.length - 1].startTime + 1, durationSeconds)
+      );
+    }
+
+    const latencyMs = Date.now() - startTime;
+    const estimatedCost = pricingService.calculateVideoAnalysisCost(durationSeconds, totalIn, totalOut, modelName);
+
+    // Record aggregated cost for the entire video once
+    pricingService.recordOperationCost({
+      videoId,
+      model: modelName,
+      inputTokens: totalIn,
+      outputTokens: totalOut,
+      estimatedCost,
+      processingTimeMs: latencyMs,
+      requestType: 'SCENE_ANALYSIS',
+    });
+
+    try {
+      if (fs.existsSync(tempDir) && fs.readdirSync(tempDir).length === 0) {
+        fs.rmdirSync(tempDir);
+      }
+    } catch {}
+
+    const assembleMsg = `🎉 Assembled ${allScenes.length} fine-grained scenes across ${numChunks} parallel segments with zero gaps!`;
+    console.log(`[VIDEO_ANALYSIS] ${assembleMsg}`);
+    if (onProgress) onProgress(assembleMsg, 88);
+
+    return {
+      scenes: allScenes,
+      inputTokens: totalIn,
+      outputTokens: totalOut,
+      estimatedCost,
+      latencyMs,
+      model: modelName,
+      rawResponse: JSON.stringify({ scenes: allScenes }, null, 2),
     };
   }
 

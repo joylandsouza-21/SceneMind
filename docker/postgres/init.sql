@@ -64,6 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_scenes_start ON scenes(start_time);
 -- 5. Searches table
 CREATE TABLE IF NOT EXISTS searches (
     id VARCHAR(64) PRIMARY KEY,
+    name VARCHAR(255),
     video_id VARCHAR(64),
     group_id VARCHAR(64),
     group_name VARCHAR(255),
@@ -72,6 +73,7 @@ CREATE TABLE IF NOT EXISTS searches (
     results JSONB DEFAULT '[]',
     segments JSONB DEFAULT '[]',
     is_segmented BOOLEAN DEFAULT FALSE,
+    part_saved_prompts JSONB DEFAULT '{}',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_searches_created ON searches(created_at DESC);
@@ -104,6 +106,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     total_steps INT DEFAULT 0,
     retry_count INT DEFAULT 0,
     error TEXT,
+    logs JSONB DEFAULT '[]',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

@@ -65,6 +65,15 @@ export class PgStore implements IStore {
         );
       `);
 
+      // Auto-migrate schema columns if they don't exist
+      await this.pool.query(`
+        ALTER TABLE searches ADD COLUMN IF NOT EXISTS part_saved_prompts JSONB DEFAULT '{}';
+        ALTER TABLE searches ADD COLUMN IF NOT EXISTS name VARCHAR(255);
+        ALTER TABLE jobs ADD COLUMN IF NOT EXISTS logs JSONB DEFAULT '[]';
+      `).catch(err => {
+        console.warn('[db] PostgreSQL auto-migration notice:', err.message);
+      });
+
       // Groups
       const groupsRes = await this.pool.query('SELECT * FROM groups_ ORDER BY created_at DESC');
       this.cache.groups = groupsRes.rows.map(this.mapGroup);
@@ -274,15 +283,15 @@ export class PgStore implements IStore {
       const updated = { ...existing, ...search, id: search.id, createdAt: now };
       this.cache.searches[existingIdx] = updated;
       this.exec(`
-        UPDATE searches SET query=$2, result_count=$3, results=$4, segments=$5, is_segmented=$6, group_name=$7, part_saved_prompts=$8, created_at=$9
+        UPDATE searches SET name=$2, query=$3, result_count=$4, results=$5, segments=$6, is_segmented=$7, group_name=$8, part_saved_prompts=$9, created_at=$10
         WHERE id=$1
-      `, [search.id, search.query, search.resultCount, JSON.stringify(search.results||[]), JSON.stringify(search.segments||[]), search.isSegmented ? true : false, search.groupName || null, JSON.stringify(search.partSavedPrompts||{}), now]);
+      `, [search.id, search.name || null, search.query, search.resultCount, JSON.stringify(search.results||[]), JSON.stringify(search.segments||[]), search.isSegmented ? true : false, search.groupName || null, JSON.stringify(search.partSavedPrompts||{}), now]);
     } else {
       this.cache.searches.unshift(search);
       this.exec(`
-        INSERT INTO searches (id, video_id, group_id, group_name, query, result_count, results, segments, is_segmented, part_saved_prompts, created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-      `, [search.id, search.videoId || null, search.groupId || null, search.groupName || null, search.query, search.resultCount, JSON.stringify(search.results||[]), JSON.stringify(search.segments||[]), search.isSegmented ? true : false, JSON.stringify(search.partSavedPrompts||{}), search.createdAt]);
+        INSERT INTO searches (id, name, video_id, group_id, group_name, query, result_count, results, segments, is_segmented, part_saved_prompts, created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      `, [search.id, search.name || null, search.videoId || null, search.groupId || null, search.groupName || null, search.query, search.resultCount, JSON.stringify(search.results||[]), JSON.stringify(search.segments||[]), search.isSegmented ? true : false, JSON.stringify(search.partSavedPrompts||{}), search.createdAt]);
     }
 
     if (this.cache.searches.length > 500) {
@@ -365,10 +374,10 @@ export class PgStore implements IStore {
     const idx = this.cache.jobs.findIndex(j => j.id === job.id);
     if (idx >= 0) { this.cache.jobs[idx] = { ...job, updatedAt: now }; } else { this.cache.jobs.push(job); }
     this.exec(`
-      INSERT INTO jobs (id, video_id, job_type, status, progress, current_step, total_steps, retry_count, error, created_at, updated_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-      ON CONFLICT (id) DO UPDATE SET status=$4, progress=$5, current_step=$6, total_steps=$7, retry_count=$8, error=$9, updated_at=$11
-    `, [job.id, job.videoId, job.jobType, job.status, job.progress, job.currentStep, job.totalSteps, job.retryCount, job.error||null, job.createdAt, now]);
+      INSERT INTO jobs (id, video_id, job_type, status, progress, current_step, total_steps, retry_count, error, logs, created_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      ON CONFLICT (id) DO UPDATE SET status=$4, progress=$5, current_step=$6, total_steps=$7, retry_count=$8, error=$9, logs=$10, updated_at=$12
+    `, [job.id, job.videoId, job.jobType, job.status, job.progress, job.currentStep, job.totalSteps, job.retryCount, job.error||null, JSON.stringify(job.logs||[]), job.createdAt, now]);
     return job;
   }
 
@@ -502,7 +511,9 @@ export class PgStore implements IStore {
       groupName: row.group_name || undefined, query: row.query, resultCount: row.result_count,
       results: typeof row.results === 'string' ? JSON.parse(row.results) : (row.results || []),
       segments: typeof row.segments === 'string' ? JSON.parse(row.segments) : (row.segments || []),
-      isSegmented: !!row.is_segmented, createdAt: row.created_at,
+      isSegmented: !!row.is_segmented,
+      partSavedPrompts: typeof row.part_saved_prompts === 'string' ? JSON.parse(row.part_saved_prompts) : (row.part_saved_prompts || {}),
+      createdAt: row.created_at,
     };
   }
 
@@ -518,7 +529,9 @@ export class PgStore implements IStore {
     return {
       id: row.id, videoId: row.video_id, jobType: row.job_type, status: row.status,
       progress: row.progress, currentStep: row.current_step || '', totalSteps: row.total_steps,
-      retryCount: row.retry_count, error: row.error || undefined, createdAt: row.created_at, updatedAt: row.updated_at,
+      retryCount: row.retry_count, error: row.error || undefined,
+      logs: typeof row.logs === 'string' ? JSON.parse(row.logs) : (row.logs || []),
+      createdAt: row.created_at, updatedAt: row.updated_at,
     };
   }
 

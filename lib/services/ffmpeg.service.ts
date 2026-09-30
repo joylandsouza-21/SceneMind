@@ -631,6 +631,53 @@ export class FFmpegService {
     });
   }
 
+  public async extractStreamChunk(
+    inputVideoPath: string,
+    startTimeSeconds: number,
+    durationSeconds: number,
+    outputChunkPath: string
+  ): Promise<string> {
+    const dir = path.dirname(outputChunkPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    return new Promise((resolve, reject) => {
+      // Fast stream copy (-c copy) operates in sub-second time without re-encoding
+      const args = [
+        '-ss', startTimeSeconds.toFixed(3),
+        '-i', inputVideoPath,
+        '-t', durationSeconds.toFixed(3),
+        '-c', 'copy',
+        '-avoid_negative_ts', 'make_zero',
+        '-movflags', '+faststart',
+        '-y',
+        outputChunkPath,
+      ];
+
+      const child = spawn(this.ffmpegPath, args);
+      let stderrAccum = '';
+      child.stderr.on('data', (data) => {
+        stderrAccum += data.toString();
+      });
+
+      child.on('close', (code) => {
+        if (code === 0 && fs.existsSync(outputChunkPath)) {
+          resolve(outputChunkPath);
+        } else {
+          // Fall back to fast transcode if -c copy fails on odd keyframe containers
+          this.createClip(inputVideoPath, startTimeSeconds, startTimeSeconds + durationSeconds, outputChunkPath)
+            .then(resolve)
+            .catch((fallbackErr) => reject(new Error(`Chunk stream extraction failed: ${fallbackErr.message}`)));
+        }
+      });
+
+      child.on('error', (err) => {
+        reject(err);
+      });
+    });
+  }
+
   public async generateSyntheticDemoVideo(outputPath: string): Promise<string> {
     const dir = path.dirname(outputPath);
     if (!fs.existsSync(dir)) {
