@@ -295,7 +295,6 @@ export default function BulkUploadQueueModal({
       const ext = file.name.split('.').pop()?.toLowerCase();
       if (!ext || !allowed.includes(ext)) return;
 
-      const isOverSize = file.size > 2 * 1024 * 1024 * 1024;
       const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
       const sizeGB = (file.size / (1024 * 1024 * 1024)).toFixed(2);
 
@@ -304,14 +303,12 @@ export default function BulkUploadQueueModal({
         file,
         name: file.name,
         sizeMB,
-        status: isOverSize ? 'failed' : 'queued',
+        status: 'queued',
         progress: 0,
-        stage: isOverSize ? 'Exceeds 2 GB Google File API limit' : 'Waiting in queue',
+        stage: 'Waiting in queue',
         groupId: effectiveGroupId,
         groupName: effectiveGroupName,
-        error: isOverSize
-          ? `File size (${sizeGB} GB) exceeds Google Gemini File API limit of 2 GB per file.`
-          : undefined,
+        error: undefined,
       });
     });
 
@@ -856,7 +853,7 @@ export default function BulkUploadQueueModal({
               <span className="font-semibold text-slate-200">Google Gemini File API Limits:</span>
             </div>
             <div className="flex flex-wrap items-center gap-2.5 text-slate-400">
-              <span>Max Size: <strong className="text-slate-200">2 GB / video</strong></span>
+              <span>Max Size: <strong className="text-slate-200">Unlimited (Chunked)</strong></span>
               <span>•</span>
               <span>Duration: <strong className="text-slate-200">Any Length (Auto-Split)</strong></span>
               <span>•</span>

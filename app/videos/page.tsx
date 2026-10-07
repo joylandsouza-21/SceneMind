@@ -491,7 +491,7 @@ export default function VideosPage() {
             <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
             <div>
               <span className="text-slate-500 block text-[11px]">Max File Size</span>
-              <span className="font-semibold text-slate-200">2 GB / video</span>
+              <span className="font-semibold text-slate-200">Unlimited (Chunked)</span>
             </div>
           </div>
           <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 flex items-center space-x-2.5">
@@ -612,15 +612,7 @@ export default function VideosPage() {
               </div>
             </div>
 
-            {/* Over 2 GB Limit Warning Banner */}
-            {selectedFile && selectedFile.size > 2 * 1024 * 1024 * 1024 && (
-              <div className="p-3.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-xs flex items-center space-x-2.5">
-                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
-                <span>
-                  <strong>Google File API limit exceeded:</strong> This video is {(selectedFile.size / (1024 * 1024 * 1024)).toFixed(2)} GB. Google allows a maximum of <strong>2 GB</strong> per video upload. Please trim or compress the video before uploading.
-                </span>
-              </div>
-            )}
+
 
             {/* Show / Group Selection for Single Upload */}
             <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800/80 flex flex-wrap items-center justify-between gap-3 text-xs">
@@ -654,7 +646,7 @@ export default function VideosPage() {
               </div>
               <button
                 onClick={handleUpload}
-                disabled={uploading || (selectedFile && selectedFile.size > 2 * 1024 * 1024 * 1024)}
+                disabled={uploading}
                 className="w-full sm:w-auto flex items-center justify-center space-x-2 px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-xl shadow-lg shadow-blue-500/20 transition-all disabled:opacity-50"
               >
                 <Upload className="w-4 h-4" />

@@ -60,12 +60,6 @@ function streamMultipartUpload(req: NextRequest): Promise<ParsedUpload> {
       filePromise = new Promise((resolveFile, rejectFile) => {
         fileStream.on('data', (chunk: Buffer) => {
           fileSize += chunk.length;
-          // Google Gemini File API maximum file size: 2 GB
-          if (fileSize > 2 * 1024 * 1024 * 1024) {
-            writeInfo.writeStream.destroy();
-            storageService.deleteFile(storageKey).catch(() => {});
-            return rejectFile(new Error('File size exceeds Google File API limit of 2 GB.'));
-          }
         });
 
         fileStream.pipe(writeInfo.writeStream);
