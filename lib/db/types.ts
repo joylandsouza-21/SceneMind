@@ -103,6 +103,12 @@ export interface ProcessingJob {
   updatedAt: string;
 }
 
+export type CostOperation =
+  | 'QUERY_EXPANSION'
+  | 'PROMPT_SEGMENTATION'
+  | 'QUERY_EMBEDDING'
+  | 'RESULT_VERIFICATION';
+
 export interface AiCost {
   id: string;
   videoId?: string;
@@ -113,6 +119,14 @@ export interface AiCost {
   estimatedCost: number;
   processingTimeMs: number;
   requestType: 'SCENE_ANALYSIS' | 'EMBEDDING' | 'TIMESTAMP_VERIFICATION' | 'RERANKING';
+  /** Finer-grained step label (only on logs recorded after search cost tracking was added) */
+  operation?: CostOperation;
+  /** Search this cost belongs to (only on newer logs) */
+  searchId?: string;
+  /** Search text at the time of the search (kept even if the search isn't saved to history) */
+  searchQuery?: string;
+  /** Video the search was limited to, if any */
+  scopeVideoId?: string;
   createdAt: string;
 }
 

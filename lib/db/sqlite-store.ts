@@ -174,6 +174,11 @@ export class SqliteStore implements IStore {
     try {
       this.db.exec("ALTER TABLE jobs ADD COLUMN logs TEXT;");
     } catch {}
+    for (const col of ['operation', 'search_id', 'search_query', 'scope_video_id']) {
+      try {
+        this.db.exec(`ALTER TABLE costs ADD COLUMN ${col} TEXT;`);
+      } catch {}
+    }
   }
 
   // --- Lifecycle (no-ops for SQLite, kept for interface compat) ---
@@ -485,12 +490,23 @@ export class SqliteStore implements IStore {
   // --- Costs ---
   public recordCost(cost: AiCost): void {
     this.db.prepare(`
-      INSERT INTO costs (id, video_id, scene_id, model, input_tokens, output_tokens, estimated_cost, processing_time_ms, request_type, created_at)
-      VALUES (@id, @videoId, @sceneId, @model, @inputTokens, @outputTokens, @estimatedCost, @processingTimeMs, @requestType, @createdAt)
+      INSERT INTO costs (id, video_id, scene_id, model, input_tokens, output_tokens, estimated_cost, processing_time_ms, request_type, created_at, operation, search_id, search_query, scope_video_id)
+      VALUES (@id, @videoId, @sceneId, @model, @inputTokens, @outputTokens, @estimatedCost, @processingTimeMs, @requestType, @createdAt, @operation, @searchId, @searchQuery, @scopeVideoId)
     `).run({
-      ...cost,
+      id: cost.id,
+      model: cost.model,
+      inputTokens: cost.inputTokens,
+      outputTokens: cost.outputTokens,
+      estimatedCost: cost.estimatedCost,
+      processingTimeMs: cost.processingTimeMs,
+      requestType: cost.requestType,
+      createdAt: cost.createdAt,
       videoId: cost.videoId || null,
       sceneId: cost.sceneId || null,
+      operation: cost.operation || null,
+      searchId: cost.searchId || null,
+      searchQuery: cost.searchQuery || null,
+      scopeVideoId: cost.scopeVideoId || null,
     });
   }
 
@@ -710,6 +726,10 @@ export class SqliteStore implements IStore {
       processingTimeMs: row.processing_time_ms,
       requestType: row.request_type,
       createdAt: row.created_at,
+      operation: row.operation || undefined,
+      searchId: row.search_id || undefined,
+      searchQuery: row.search_query || undefined,
+      scopeVideoId: row.scope_video_id || undefined,
     };
   }
 

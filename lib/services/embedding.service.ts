@@ -22,37 +22,94 @@ export interface PromptSegment {
   endIndex: number;
 }
 
+/**
+ * Splits a single line/block into sentences, stripping any leading bullet or numbering.
+ */
+export function splitIntoSentences(block: string): string[] {
+  // Strip bullet points or leading numbering: "1.", "1)", "- ", "* ", "Step 1:"
+  const cleanedBlock = block.trim().replace(/^(?:\d+[\.\)]\s*|[-*•]\s*|(?:part|scene|step)\s*\d+[:\.\s-]*)/i, '').trim();
+  if (!cleanedBlock) return [];
+
+  // Split block into individual sentences by punctuation (. ! ? ; or em-dash)
+  const blockSentences = cleanedBlock
+    .split(/(?<=[.!?;\n])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  return blockSentences.length > 0 ? blockSentences : [cleanedBlock];
+}
+
+/**
+ * Splits a prompt into paragraphs, each represented as a list of sentences.
+ * Paragraphs are separated by blank lines; if the prompt has no blank lines,
+ * every non-empty line is treated as its own paragraph.
+ */
+export function splitPromptIntoParagraphs(query: string): string[][] {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+
+  const paragraphSeparator = /\r?\n[ \t]*\r?\n/;
+  const hasBlankLines = paragraphSeparator.test(trimmed);
+  const blocks = trimmed
+    .split(hasBlankLines ? /(?:\r?\n[ \t]*){2,}/ : /\r?\n+/)
+    .map((b) => b.trim())
+    .filter((b) => b.length > 0);
+
+  return blocks
+    .map((block) => block.split(/\r?\n+/).flatMap((line) => splitIntoSentences(line)))
+    .filter((sentences) => sentences.length > 0);
+}
+
+/**
+ * Converts ordered chunk texts into PromptSegment objects with character offsets.
+ */
+export function buildPromptSegments(fullText: string, chunks: string[]): PromptSegment[] {
+  const trimmed = fullText.trim();
+  let searchCursor = 0;
+  return chunks.map((text, idx) => {
+    const startIndex = trimmed.indexOf(text, searchCursor);
+    const endIndex = startIndex !== -1 ? startIndex + text.length : searchCursor + text.length;
+    searchCursor = Math.max(searchCursor, endIndex);
+
+    return {
+      id: `seg_${idx}`,
+      index: idx + 1,
+      label: `Part ${idx + 1}`,
+      text,
+      wordCount: text.split(/\s+/).filter(Boolean).length,
+      charCount: text.length,
+      startIndex: startIndex !== -1 ? startIndex : 0,
+      endIndex,
+    };
+  });
+}
+
 export function segmentPrompt(query: string): PromptSegment[] {
   const trimmed = query.trim();
   if (!trimmed) return [];
 
-  // Step 1: Split into raw lines / paragraphs / list items
-  const rawBlocks = trimmed
+  // Step 1: Split into raw lines / paragraphs / list items, then into sentences
+  const sentences: string[] = trimmed
     .split(/\r?\n+/)
     .map((l) => l.trim())
-    .filter((l) => l.length > 0);
+    .filter((l) => l.length > 0)
+    .flatMap((block) => splitIntoSentences(block));
 
-  const sentences: string[] = [];
+  // Step 2: Group sentences into scene-sized chunks
+  const sceneChunks = chunkSentences(sentences);
 
-  for (const block of rawBlocks) {
-    // Strip bullet points or leading numbering: "1.", "1)", "- ", "* ", "Step 1:"
-    const cleanedBlock = block.replace(/^(?:\d+[\.\)]\s*|[-*•]\s*|(?:part|scene|step)\s*\d+[:\.\s-]*)/i, '').trim();
-    if (!cleanedBlock) continue;
-
-    // Split block into individual sentences by punctuation (. ! ? ; or em-dash)
-    const blockSentences = cleanedBlock
-      .split(/(?<=[.!?;\n])\s+/)
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-
-    if (blockSentences.length > 0) {
-      sentences.push(...blockSentences);
-    } else {
-      sentences.push(cleanedBlock);
-    }
+  // Fallback if empty
+  if (sceneChunks.length === 0) {
+    sceneChunks.push(trimmed);
   }
 
-  // Step 2: Group sentences into ideal scene-sized chunks (1-2 sentences, ~15-35 words per part)
+  return buildPromptSegments(trimmed, sceneChunks);
+}
+
+/**
+ * Groups sentences into ideal scene-sized chunks (1-2 sentences, ~15-35 words per part).
+ */
+export function chunkSentences(sentences: string[]): string[] {
   const sceneChunks: string[] = [];
   let currentChunk = '';
 
@@ -80,28 +137,7 @@ export function segmentPrompt(query: string): PromptSegment[] {
     sceneChunks.push(currentChunk);
   }
 
-  // Fallback if empty
-  if (sceneChunks.length === 0) {
-    sceneChunks.push(trimmed);
-  }
-
-  let searchCursor = 0;
-  return sceneChunks.map((text, idx) => {
-    const startIndex = trimmed.indexOf(text, searchCursor);
-    const endIndex = startIndex !== -1 ? startIndex + text.length : searchCursor + text.length;
-    searchCursor = Math.max(searchCursor, endIndex);
-
-    return {
-      id: `seg_${idx}`,
-      index: idx + 1,
-      label: `Part ${idx + 1}`,
-      text,
-      wordCount: text.split(/\s+/).filter(Boolean).length,
-      charCount: text.length,
-      startIndex: startIndex !== -1 ? startIndex : 0,
-      endIndex,
-    };
-  });
+  return sceneChunks;
 }
 
 export class EmbeddingService {

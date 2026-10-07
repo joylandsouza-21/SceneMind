@@ -1,7 +1,14 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { db } from '../db';
 import { VectorRecord } from '../db/types';
-import { embeddingService } from './embedding.service';
+import {
+  embeddingService,
+  PromptSegment,
+  segmentPrompt,
+  splitPromptIntoParagraphs,
+  chunkSentences,
+  buildPromptSegments,
+} from './embedding.service';
 import { vectorService, VectorSearchResult } from './vector.service';
 import { aiConfigService, normalizeAnthropicModel } from './ai-config.service';
 import { pricingService } from './pricing.service';
@@ -80,7 +87,191 @@ async function withAiRetry<T>(fn: () => Promise<T>, maxRetries = 1, delayMs = 12
   }
 }
 
+export type ParagraphContinuity = 'continuous' | 'back_and_forth';
+
+export interface ContinuitySegmentationResult {
+  segments: PromptSegment[];
+  /** 'ai' when the LLM classified paragraphs, 'legacy' when the word-count segmenter was used */
+  mode: 'ai' | 'legacy';
+  paragraphs?: { index: number; type: ParagraphContinuity; partCount: number; reason?: string }[];
+  warning?: string;
+}
+
 export class SearchService {
+  /**
+   * Stage 0: Continuity-aware prompt segmentation.
+   * An LLM labels each paragraph as a continuous scene or back-and-forth.
+   * - continuous     -> kept as 1 part, or split into at most 2 parts at a natural beat
+   * - back_and_forth -> split with the legacy sentence/word-count chunker
+   * Falls back to the legacy segmenter if AI is unavailable or fails.
+   */
+  public async segmentPromptByContinuity(query: string): Promise<ContinuitySegmentationResult> {
+    const trimmed = query.trim();
+    const legacy = (warning?: string): ContinuitySegmentationResult => ({
+      segments: segmentPrompt(trimmed),
+      mode: 'legacy',
+      warning,
+    });
+
+    const paragraphs = splitPromptIntoParagraphs(trimmed);
+    const totalSentences = paragraphs.reduce((sum, p) => sum + p.length, 0);
+
+    // Nothing to decide for very short prompts
+    if (paragraphs.length === 0 || totalSentences <= 2) return legacy();
+
+    const config = aiConfigService.getEffectiveConfig('semantic_search');
+    if (!config.apiKey) return legacy();
+
+    const paragraphsPrompt = paragraphs
+      .map((sentences, pIdx) => {
+        const lines = sentences.map((s, sIdx) => `  S${sIdx + 1}: ${s}`).join('\n');
+        return `[PARAGRAPH ${pIdx + 1}] (${sentences.length} sentences)\n${lines}`;
+      })
+      .join('\n\n');
+
+    const prompt = `You are a film editor segmenting a video recap script into searchable parts.
+For EACH paragraph below, decide its continuity type:
+
+- "continuous": the paragraph describes ONE unbroken scene - same location, same continuous moment in time, the action simply flows forward. No cuts to other places, no time jumps, no flashbacks, no intercutting between storylines.
+- "back_and_forth": the paragraph jumps between locations, time periods, flashbacks/present, or intercuts between different characters/storylines, or clearly describes multiple distinct scenes.
+
+For "continuous" paragraphs also pick "splitAfterSentence":
+- null if the paragraph is short or is a single beat (keep as 1 part).
+- otherwise the sentence number N (1 <= N < sentence count) after which the most natural beat change occurs, so the paragraph becomes exactly 2 parts.
+For "back_and_forth" paragraphs set "splitAfterSentence" to null.
+
+Paragraphs:
+${paragraphsPrompt}
+
+Respond ONLY with a valid JSON array, one entry per paragraph, in order:
+[
+  { "paragraph": 1, "type": "continuous" | "back_and_forth", "splitAfterSentence": number | null, "reason": "short reason" }
+]`;
+
+    try {
+      const startMs = Date.now();
+      const { text, inputTokens, outputTokens } = await this.callTextModel(config, prompt, {
+        temperature: 0.1,
+        maxTokens: Math.min(4000, 200 + paragraphs.length * 80),
+      });
+
+      // Record cost as soon as the AI has responded, so tokens are counted even if parsing fails
+      const modelUsed = config.modelName || config.provider;
+      pricingService.recordOperationCost({
+        model: modelUsed,
+        inputTokens,
+        outputTokens,
+        estimatedCost: pricingService.calculateTextAiCost(modelUsed, inputTokens, outputTokens),
+        processingTimeMs: Date.now() - startMs,
+        requestType: 'RERANKING',
+        operation: 'PROMPT_SEGMENTATION',
+      });
+
+      if (!text) return legacy('AI segmentation returned no output; used default part splitting.');
+
+      const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+      const parsed = JSON.parse(cleaned);
+      const evaluations: any[] = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.paragraphs) ? parsed.paragraphs : [];
+
+      const evalMap = new Map<number, any>();
+      evaluations.forEach((ev, i) => {
+        const idx = Number.isInteger(ev?.paragraph) ? ev.paragraph : i + 1;
+        evalMap.set(idx, ev);
+      });
+
+      const chunks: string[] = [];
+      const paragraphInfo: NonNullable<ContinuitySegmentationResult['paragraphs']> = [];
+
+      paragraphs.forEach((sentences, pIdx) => {
+        const ev = evalMap.get(pIdx + 1);
+        const type: ParagraphContinuity = ev?.type === 'continuous' ? 'continuous' : 'back_and_forth';
+
+        let paragraphChunks: string[];
+        if (type === 'continuous') {
+          const split = Number(ev?.splitAfterSentence);
+          if (Number.isInteger(split) && split >= 1 && split < sentences.length) {
+            paragraphChunks = [sentences.slice(0, split).join(' '), sentences.slice(split).join(' ')];
+          } else {
+            paragraphChunks = [sentences.join(' ')];
+          }
+        } else {
+          paragraphChunks = chunkSentences(sentences);
+        }
+
+        chunks.push(...paragraphChunks);
+        paragraphInfo.push({ index: pIdx + 1, type, partCount: paragraphChunks.length, reason: ev?.reason });
+      });
+
+      if (chunks.length === 0) return legacy();
+
+      return {
+        segments: buildPromptSegments(trimmed, chunks),
+        mode: 'ai',
+        paragraphs: paragraphInfo,
+      };
+    } catch (err: any) {
+      console.warn(`[SEARCH_SEGMENTATION] AI continuity segmentation fallback: ${err.message}`);
+      return legacy(`AI segmentation fallback: ${err.message}`);
+    }
+  }
+
+  /**
+   * Minimal text-completion helper for Gemini / Anthropic providers.
+   */
+  private async callTextModel(
+    config: ReturnType<typeof aiConfigService.getEffectiveConfig>,
+    prompt: string,
+    opts: { temperature: number; maxTokens: number }
+  ): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
+    const apiKey = config.apiKey;
+    if (!apiKey) throw new Error('No API key configured');
+
+    if (config.provider === 'gemini') {
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({
+        model: config.modelName || 'gemini-3.8-flash',
+        generationConfig: { responseMimeType: 'application/json', temperature: opts.temperature },
+      });
+      const res = await withAiRetry(() => model.generateContent(prompt));
+      const text = res.response.text();
+      const usage = (res.response as any)?.usageMetadata;
+      return {
+        text,
+        inputTokens: usage?.promptTokenCount ?? Math.ceil(prompt.length / 4),
+        outputTokens: usage?.candidatesTokenCount ?? Math.ceil(text.length / 4),
+      };
+    }
+
+    if (config.provider === 'anthropic') {
+      const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/v1/messages` : 'https://api.anthropic.com/v1/messages';
+      const modelId = normalizeAnthropicModel(config.modelName, 'claude-3-5-haiku-20241022');
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: opts.maxTokens,
+          temperature: opts.temperature,
+        }),
+      });
+      if (!res.ok) throw new Error(`Anthropic request failed (${res.status})`);
+      const data = await res.json();
+      const text = data.content?.[0]?.text || '';
+      return {
+        text,
+        inputTokens: data.usage?.input_tokens ?? Math.ceil(prompt.length / 4),
+        outputTokens: data.usage?.output_tokens ?? Math.ceil(text.length / 4),
+      };
+    }
+
+    throw new Error(`Unsupported provider for segmentation: ${config.provider}`);
+  }
+
   /**
    * Stage 1: AI Query Expansion (Synonyms, Visual Actions, & Entity Extraction)
    */
@@ -181,6 +372,7 @@ Respond ONLY with valid JSON in this exact structure:
             estimatedCost,
             processingTimeMs: latencyMs,
             requestType: 'RERANKING',
+            operation: 'QUERY_EXPANSION',
           });
 
           return {
@@ -482,6 +674,7 @@ Respond ONLY with valid JSON array of evaluations:
             estimatedCost,
             processingTimeMs: latencyMs,
             requestType: 'RERANKING',
+            operation: 'RESULT_VERIFICATION',
           });
 
           const rerankedList: RerankedSceneResult[] = [];

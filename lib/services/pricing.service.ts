@@ -1,6 +1,7 @@
 import { db } from '../db';
-import { AiCost } from '../db/types';
+import { AiCost, CostOperation } from '../db/types';
 import { v4 as uuidv4 } from 'uuid';
+import { getCostContext } from './cost-context';
 
 export interface PricingRates {
   geminiFlashInputPerMillion: number;
@@ -209,7 +210,15 @@ export class PricingService {
     estimatedCost: number;
     processingTimeMs: number;
     requestType: 'SCENE_ANALYSIS' | 'EMBEDDING' | 'TIMESTAMP_VERIFICATION' | 'RERANKING';
+    operation?: CostOperation;
   }): AiCost {
+    // Attach the active search (if this cost was incurred while serving a search request)
+    const ctx = getCostContext();
+    let operation = params.operation;
+    if (!operation && ctx?.searchId && params.requestType === 'EMBEDDING') {
+      operation = 'QUERY_EMBEDDING';
+    }
+
     const record: AiCost = {
       id: uuidv4(),
       videoId: params.videoId,
@@ -220,6 +229,10 @@ export class PricingService {
       estimatedCost: params.estimatedCost,
       processingTimeMs: params.processingTimeMs,
       requestType: params.requestType,
+      operation,
+      searchId: ctx?.searchId,
+      searchQuery: ctx?.searchQuery,
+      scopeVideoId: ctx?.scopeVideoId,
       createdAt: new Date().toISOString(),
     };
     db.recordCost(record);

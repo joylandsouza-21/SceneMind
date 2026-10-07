@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { db } from '@/lib/db';
 import { VideoSearch } from '@/lib/db/types';
 import { searchService } from '@/lib/services/search.service';
+import { runWithCostContext } from '@/lib/services/cost-context';
 
 export async function POST(
   req: NextRequest,
@@ -20,6 +21,8 @@ export async function POST(
       return NextResponse.json({ error: 'Video not found' }, { status: 404 });
     }
 
+    const searchId = `search_${uuidv4()}`;
+    return await runWithCostContext({ searchId, searchQuery: query.trim(), scopeVideoId: params.id }, async () => {
     // Step 1: AI Query Expansion (Synonyms, Visual Actions, & Entity Extraction)
     const expansion = await searchService.expandQuery(query);
 
@@ -40,7 +43,7 @@ export async function POST(
 
     // Record search in database
     const searchRecord: VideoSearch = {
-      id: `search_${uuidv4()}`,
+      id: searchId,
       videoId: params.id,
       query,
       resultCount: results.length,
@@ -53,6 +56,7 @@ export async function POST(
       videoId: params.id,
       count: results.length,
       results,
+    });
     });
   } catch (err: any) {
     console.error('Search error:', err);

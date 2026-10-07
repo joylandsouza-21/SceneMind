@@ -2,10 +2,17 @@ import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '@/lib/db';
 import { VideoSearch } from '@/lib/db/types';
-import { segmentPrompt, PromptSegment } from '@/lib/services/embedding.service';
+import { PromptSegment } from '@/lib/services/embedding.service';
 import { searchService, RerankedSceneResult } from '@/lib/services/search.service';
+import { runWithCostContext, CostContext } from '@/lib/services/cost-context';
 
 export async function POST(req: NextRequest) {
+  // All AI costs recorded while serving this request are linked to this search id
+  const costCtx: CostContext = { searchId: `search_${uuidv4()}` };
+  return runWithCostContext(costCtx, () => handleSearch(req, costCtx));
+}
+
+async function handleSearch(req: NextRequest, costCtx: CostContext) {
   try {
     const { query, autoVerify = true, limit = 15, groupId, videoId, forceLive = false, saveHistory = true } = await req.json();
 
@@ -14,6 +21,8 @@ export async function POST(req: NextRequest) {
     }
 
     const trimmedQuery = query.trim();
+    costCtx.searchQuery = trimmedQuery;
+    if (videoId && videoId !== 'all') costCtx.scopeVideoId = videoId;
 
     // Allow long multi-scene recap prompts up to 8,192 tokens (~32,768 chars)
     const estimatedTokens = Math.ceil(trimmedQuery.length / 4);
@@ -72,8 +81,10 @@ export async function POST(req: NextRequest) {
     const videos = db.getVideos();
     const videoMap = new Map(videos.map((v) => [v.id, v]));
 
-    // Segment the prompt into semantic parts
-    const rawSegments: PromptSegment[] = segmentPrompt(trimmedQuery);
+    // Segment the prompt into parts: continuous-scene paragraphs become at most 2 parts,
+    // back-and-forth paragraphs keep the fine-grained split (LLM-classified, legacy fallback)
+    const segmentation = await searchService.segmentPromptByContinuity(trimmedQuery);
+    const rawSegments: PromptSegment[] = segmentation.segments;
     const isMultiSegment = rawSegments.length > 1;
 
     // Track segment match mappings: sceneId -> SegmentMatch[]
@@ -89,6 +100,7 @@ export async function POST(req: NextRequest) {
     const sceneMatchMap = new Map<string, RerankedSceneResult>();
     let segmentSummaries: (PromptSegment & { matchedClipCount: number; matchedClipIds: string[] })[] = [];
     const warnings: string[] = [];
+    if (segmentation.warning) warnings.push(segmentation.warning);
 
     if (isMultiSegment) {
       const segmentResults = await Promise.all(
@@ -254,7 +266,7 @@ export async function POST(req: NextRequest) {
 
     const targetGroup = groupId && groupId !== 'all' ? db.getGroup(groupId) : undefined;
     const searchRecord: VideoSearch = {
-      id: `search_${uuidv4()}`,
+      id: costCtx.searchId!,
       query: trimmedQuery,
       groupId: groupId && groupId !== 'all' ? groupId : undefined,
       groupName: targetGroup?.name,

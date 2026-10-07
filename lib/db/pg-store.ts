@@ -70,6 +70,10 @@ export class PgStore implements IStore {
         ALTER TABLE searches ADD COLUMN IF NOT EXISTS part_saved_prompts JSONB DEFAULT '{}';
         ALTER TABLE searches ADD COLUMN IF NOT EXISTS name VARCHAR(255);
         ALTER TABLE jobs ADD COLUMN IF NOT EXISTS logs JSONB DEFAULT '[]';
+        ALTER TABLE costs ADD COLUMN IF NOT EXISTS operation VARCHAR(64);
+        ALTER TABLE costs ADD COLUMN IF NOT EXISTS search_id VARCHAR(64);
+        ALTER TABLE costs ADD COLUMN IF NOT EXISTS search_query TEXT;
+        ALTER TABLE costs ADD COLUMN IF NOT EXISTS scope_video_id VARCHAR(64);
       `).catch(err => {
         console.warn('[db] PostgreSQL auto-migration notice:', err.message);
       });
@@ -392,9 +396,9 @@ export class PgStore implements IStore {
   public recordCost(cost: AiCost): void {
     this.cache.costs.push(cost);
     this.exec(`
-      INSERT INTO costs (id, video_id, scene_id, model, input_tokens, output_tokens, estimated_cost, processing_time_ms, request_type, created_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-    `, [cost.id, cost.videoId||null, cost.sceneId||null, cost.model, cost.inputTokens, cost.outputTokens, cost.estimatedCost, cost.processingTimeMs, cost.requestType, cost.createdAt]);
+      INSERT INTO costs (id, video_id, scene_id, model, input_tokens, output_tokens, estimated_cost, processing_time_ms, request_type, created_at, operation, search_id, search_query, scope_video_id)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+    `, [cost.id, cost.videoId||null, cost.sceneId||null, cost.model, cost.inputTokens, cost.outputTokens, cost.estimatedCost, cost.processingTimeMs, cost.requestType, cost.createdAt, cost.operation||null, cost.searchId||null, cost.searchQuery||null, cost.scopeVideoId||null]);
   }
 
   public getCosts(videoId?: string): AiCost[] {
@@ -540,7 +544,10 @@ export class PgStore implements IStore {
       id: row.id, videoId: row.video_id || undefined, sceneId: row.scene_id || undefined,
       model: row.model, inputTokens: row.input_tokens, outputTokens: row.output_tokens,
       estimatedCost: row.estimated_cost, processingTimeMs: row.processing_time_ms,
-      requestType: row.request_type, createdAt: row.created_at,
+      requestType: row.request_type,
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+      operation: row.operation || undefined, searchId: row.search_id || undefined,
+      searchQuery: row.search_query || undefined, scopeVideoId: row.scope_video_id || undefined,
     };
   }
 
