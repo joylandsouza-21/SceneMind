@@ -24,7 +24,14 @@ import {
   AlertCircle,
   X,
   Folder,
-  Plus
+  Plus,
+  Download,
+  Copy,
+  Check,
+  ChevronDown,
+  FileText,
+  FileCode,
+  SlidersHorizontal
 } from 'lucide-react';
 import VideoPlayer, { VideoPlayerRef, formatTime } from '@/components/VideoPlayer';
 import TimelineBar from '@/components/TimelineBar';
@@ -32,6 +39,7 @@ import ClipModal from '@/components/ClipModal';
 import ProcessingLogsConsole from '@/components/ProcessingLogsConsole';
 import ConfirmModal from '@/components/ConfirmModal';
 import AssignGroupModal from '@/components/AssignGroupModal';
+import ExportScenesModal from '@/components/ExportScenesModal';
 import { VideoScene } from '@/lib/db/types';
 
 function VideoStudioContent({ params }: { params: { id: string } }) {
@@ -62,6 +70,12 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
   // Group modal state
   const [groups, setGroups] = useState<any[]>([]);
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
+
+  // Scene export state
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [quickCopied, setQuickCopied] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
 
   const playerRef = useRef<VideoPlayerRef | null>(null);
   const hasScrolledRef = useRef(false);
@@ -108,6 +122,164 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Close export menu on outside click
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
+        setExportMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Quick export handlers (defaults to timestamped script)
+  const handleQuickCopyMergedDescriptions = async () => {
+    if (!scenes || scenes.length === 0) return;
+    const sorted = [...scenes].sort((a, b) => {
+      if (a.sceneNumber && b.sceneNumber) return a.sceneNumber - b.sceneNumber;
+      return a.startTime - b.startTime;
+    });
+    const merged = sorted
+      .map(
+        (s, idx) =>
+          `[${formatTime(s.startTime)} → ${formatTime(s.endTime)}] Scene #${s.sceneNumber || idx + 1}: ${s.description.trim()}`
+      )
+      .join('\n\n');
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(merged);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = merged;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      setQuickCopied(true);
+      setTimeout(() => setQuickCopied(false), 2000);
+    } catch (e) {
+      console.error('Failed to copy timestamped descriptions:', e);
+    }
+  };
+
+  const handleQuickDownloadTxt = () => {
+    if (!scenes || scenes.length === 0) return;
+    const sorted = [...scenes].sort((a, b) => {
+      if (a.sceneNumber && b.sceneNumber) return a.sceneNumber - b.sceneNumber;
+      return a.startTime - b.startTime;
+    });
+    const merged = sorted
+      .map(
+        (s, idx) =>
+          `[${formatTime(s.startTime)} → ${formatTime(s.endTime)}] Scene #${s.sceneNumber || idx + 1}: ${s.description.trim()}`
+      )
+      .join('\n\n');
+    const safeTitle = (video?.filename || 'scenes')
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, '_')
+      .replace(/_+/g, '_')
+      .slice(0, 40);
+    const blob = new Blob([merged], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${safeTitle}_timestamped_scenes_${sorted.length}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleQuickDownloadMd = () => {
+    if (!scenes || scenes.length === 0) return;
+    const sorted = [...scenes].sort((a, b) => {
+      if (a.sceneNumber && b.sceneNumber) return a.sceneNumber - b.sceneNumber;
+      return a.startTime - b.startTime;
+    });
+    const safeTitle = (video?.filename || 'scenes')
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, '_')
+      .replace(/_+/g, '_')
+      .slice(0, 40);
+
+    const content = [
+      `# ${video?.filename || 'Video'} - Merged Scene Descriptions`,
+      ``,
+      `- **Total Scenes**: ${sorted.length}`,
+      `- **Duration**: ${formatTime(video?.duration || 0)}`,
+      `- **Exported At**: ${new Date().toLocaleString()}`,
+      ``,
+      `## Continuous Merged Narrative`,
+      ``,
+      sorted.map((s) => s.description.trim()).join(' '),
+      ``,
+      `---`,
+      ``,
+      `## Chronological Breakdown`,
+      ``,
+      ...sorted.map(
+        (s, idx) =>
+          `### Scene ${s.sceneNumber || idx + 1} (${formatTime(s.startTime)} - ${formatTime(s.endTime)})\n\n${s.description.trim()}\n`
+      ),
+    ].join('\n');
+
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${safeTitle}_merged_scenes_${sorted.length}.md`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleQuickDownloadJson = () => {
+    if (!scenes || scenes.length === 0) return;
+    const sorted = [...scenes].sort((a, b) => {
+      if (a.sceneNumber && b.sceneNumber) return a.sceneNumber - b.sceneNumber;
+      return a.startTime - b.startTime;
+    });
+    const safeTitle = (video?.filename || 'scenes')
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, '_')
+      .replace(/_+/g, '_')
+      .slice(0, 40);
+
+    const data = {
+      title: video?.filename || 'Video',
+      totalScenes: sorted.length,
+      duration: video?.duration || 0,
+      mergedDescription: sorted.map((s) => s.description.trim()).join(' '),
+      scenes: sorted.map((s, idx) => ({
+        sceneNumber: s.sceneNumber || idx + 1,
+        startTime: s.startTime,
+        endTime: s.endTime,
+        startTimeFormatted: formatTime(s.startTime),
+        endTimeFormatted: formatTime(s.endTime),
+        duration: s.duration,
+        description: s.description,
+        location: s.location || null,
+        people: s.people || [],
+        actions: s.actions || [],
+        objects: s.objects || [],
+        confidence: s.confidence,
+      })),
+    };
+
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${safeTitle}_merged_scenes_${sorted.length}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   useEffect(() => {
@@ -402,6 +574,95 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
             <Sliders className="w-3.5 h-3.5" />
             <span>Index Explorer</span>
           </Link>
+
+          {/* Export Scenes (Merged Descriptions) */}
+          {scenes.length > 0 && (
+            <div className="relative" ref={exportMenuRef}>
+              <div className="inline-flex rounded-xl shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => setIsExportModalOpen(true)}
+                  className="flex items-center space-x-2 px-3.5 py-2 rounded-l-xl bg-slate-800/80 hover:bg-slate-700 text-slate-200 text-xs font-medium border border-slate-700 hover:text-white transition-colors cursor-pointer"
+                  title="Export all scene descriptions merged together"
+                >
+                  <Download className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Export Scenes ({scenes.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExportMenuOpen((prev) => !prev)}
+                  className="px-2 py-2 rounded-r-xl bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white text-xs transition-colors border-y border-r border-slate-700 cursor-pointer"
+                  title="Quick export options"
+                >
+                  <ChevronDown className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {exportMenuOpen && (
+                <div className="absolute right-0 mt-2 w-64 rounded-xl bg-slate-900 border border-slate-800 shadow-2xl py-1 z-30 animate-in fade-in zoom-in-95">
+                  <div className="px-3 py-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-800/60">
+                    Export Merged Scenes ({scenes.length})
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsExportModalOpen(true);
+                      setExportMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs text-slate-200 hover:bg-indigo-600/20 hover:text-indigo-300 flex items-center space-x-2 transition-colors cursor-pointer"
+                  >
+                    <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>Preview & Customize Export...</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleQuickDownloadTxt();
+                      setExportMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs text-slate-200 hover:bg-slate-800 flex items-center space-x-2 transition-colors cursor-pointer"
+                  >
+                    <FileText className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Download Timestamped Script (.txt)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleQuickDownloadMd();
+                      setExportMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs text-slate-200 hover:bg-slate-800 flex items-center space-x-2 transition-colors cursor-pointer"
+                  >
+                    <FileText className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Download Markdown Report (.md)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleQuickDownloadJson();
+                      setExportMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs text-slate-200 hover:bg-slate-800 flex items-center space-x-2 transition-colors cursor-pointer"
+                  >
+                    <FileCode className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Download JSON Dataset (.json)</span>
+                  </button>
+                  <div className="border-t border-slate-800/60 my-1"></div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleQuickCopyMergedDescriptions();
+                      setExportMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs text-slate-200 hover:bg-slate-800 flex items-center space-x-2 transition-colors cursor-pointer"
+                  >
+                    <Copy className="w-3.5 h-3.5 text-purple-400" />
+                    <span>Copy Timestamped Script</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           {video.status !== 'processing' && video.status !== 'pending' && (
             <button
@@ -872,6 +1133,15 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
           fetchVideoDetails();
           fetchGroups();
         }}
+      />
+
+      {/* Export Scenes Modal */}
+      <ExportScenesModal
+        isOpen={isExportModalOpen}
+        onClose={() => setIsExportModalOpen(false)}
+        scenes={scenes}
+        videoTitle={video?.filename || video?.title || 'Video'}
+        videoDuration={video?.duration || 0}
       />
     </div>
   );
