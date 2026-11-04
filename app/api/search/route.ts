@@ -1,31 +1,39 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
-import { db } from '@/lib/db/store';
+import { db } from '@/lib/db';
 import { VideoSearch } from '@/lib/db/types';
-import { embeddingService, segmentPrompt, PromptSegment } from '@/lib/services/embedding.service';
-import { vectorService } from '@/lib/services/vector.service';
-import { timestampVerificationService } from '@/lib/services/timestamp-verification.service';
+import { PromptSegment } from '@/lib/services/embedding.service';
+import { searchService, RerankedSceneResult } from '@/lib/services/search.service';
+import { runWithCostContext, CostContext } from '@/lib/services/cost-context';
 
 export async function POST(req: NextRequest) {
+  // All AI costs recorded while serving this request are linked to this search id
+  const costCtx: CostContext = { searchId: `search_${uuidv4()}` };
+  return runWithCostContext(costCtx, () => handleSearch(req, costCtx));
+}
+
+async function handleSearch(req: NextRequest, costCtx: CostContext) {
   try {
-    const { query, autoVerify = true, limit = 15, groupId, videoId, forceLive = false } = await req.json();
+    const { query, autoVerify = true, limit = 15, groupId, videoId, forceLive = false, saveHistory = true } = await req.json();
 
     if (!query || typeof query !== 'string' || query.trim() === '') {
       return NextResponse.json({ error: 'Search query is required' }, { status: 400 });
     }
 
     const trimmedQuery = query.trim();
+    costCtx.searchQuery = trimmedQuery;
+    if (videoId && videoId !== 'all') costCtx.scopeVideoId = videoId;
 
-    // Google Gemini text-embedding-004 limit is 2,048 tokens (~8,192 chars)
+    // Allow long multi-scene recap prompts up to 8,192 tokens (~32,768 chars)
     const estimatedTokens = Math.ceil(trimmedQuery.length / 4);
-    if (estimatedTokens > 2048) {
+    if (estimatedTokens > 8192) {
       return NextResponse.json({
-        error: `Search prompt exceeds Google Gemini embedding limit of 2,048 tokens (your query is ~${estimatedTokens} tokens / ${trimmedQuery.length} characters). Please shorten your search prompt.`
+        error: `Search prompt exceeds maximum script limit of 8,192 tokens (~${estimatedTokens} tokens / ${trimmedQuery.length} characters). Please shorten your prompt.`
       }, { status: 400 });
     }
 
     // Check if we already have cached results for this exact query, group, and video scope
-    if (!forceLive) {
+    if (!forceLive && saveHistory) {
       const cachedSearch = db.findCachedSearch(
         trimmedQuery,
         groupId && groupId !== 'all' ? groupId : undefined,
@@ -73,8 +81,10 @@ export async function POST(req: NextRequest) {
     const videos = db.getVideos();
     const videoMap = new Map(videos.map((v) => [v.id, v]));
 
-    // Segment the prompt into semantic parts
-    const rawSegments: PromptSegment[] = segmentPrompt(trimmedQuery);
+    // Segment the prompt into parts: continuous-scene paragraphs become at most 2 parts,
+    // back-and-forth paragraphs keep the fine-grained split (LLM-classified, legacy fallback)
+    const segmentation = await searchService.segmentPromptByContinuity(trimmedQuery);
+    const rawSegments: PromptSegment[] = segmentation.segments;
     const isMultiSegment = rawSegments.length > 1;
 
     // Track segment match mappings: sceneId -> SegmentMatch[]
@@ -87,31 +97,61 @@ export async function POST(req: NextRequest) {
     }
 
     const sceneSegmentMap = new Map<string, SceneSegmentMatch[]>();
-    const sceneMatchMap = new Map<string, any>();
-
-    // 1. Generate embedding for the full query
-    const { embedding: globalEmbedding } = await embeddingService.generateEmbedding(trimmedQuery);
-    const globalMatches = await vectorService.search(globalEmbedding, limit, videoIdFilter, 0.05);
-
-    for (const m of globalMatches) {
-      sceneMatchMap.set(m.sceneId, m);
-    }
-
-    // 2. If multi-segment, generate embeddings for each segment and search
+    const sceneMatchMap = new Map<string, RerankedSceneResult>();
     let segmentSummaries: (PromptSegment & { matchedClipCount: number; matchedClipIds: string[] })[] = [];
+    const warnings: string[] = [];
+    if (segmentation.warning) warnings.push(segmentation.warning);
 
     if (isMultiSegment) {
       const segmentResults = await Promise.all(
         rawSegments.map(async (seg: PromptSegment) => {
-          const { embedding: segEmbedding } = await embeddingService.generateEmbedding(seg.text);
-          const segMatches = await vectorService.search(segEmbedding, Math.min(limit, 10), videoIdFilter, 0.05);
-          return { segment: seg, matches: segMatches };
+          const expansion = await searchService.expandQuery(seg.text);
+          if (expansion.warning) warnings.push(expansion.warning);
+          const candidates = await searchService.retrieveCandidates({
+            expansion,
+            videoIdFilter,
+            candidateLimit: 12,
+          });
+
+          const reranked = autoVerify
+            ? await searchService.rerankAndFilter({
+                query: seg.text,
+                candidates,
+                minConfidenceThreshold: 35,
+                onWarning: (w) => warnings.push(w),
+              })
+            : candidates.map((c) => ({
+                sceneId: c.sceneId,
+                videoId: c.videoId,
+                videoName: videoMap.get(c.videoId)?.filename || 'Unknown Video',
+                videoDuration: videoMap.get(c.videoId)?.duration || 0,
+                videoStoragePath: videoMap.get(c.videoId)?.storagePath || '',
+                thumbnailUrl: `/api/media/thumbnails/thumb_${c.videoId}.jpg`,
+                similarityScore: Math.round(c.similarity * 100),
+                confidenceScore: Math.round(c.similarity * 100),
+                startTime: c.metadata.startTime,
+                endTime: c.metadata.endTime,
+                verifiedStartTime: c.metadata.startTime,
+                verifiedEndTime: c.metadata.endTime,
+                duration: Math.round((c.metadata.endTime - c.metadata.startTime) * 10) / 10,
+                description: c.metadata.description,
+                actions: c.metadata.actions || [],
+                objects: c.metadata.objects || [],
+                people: c.metadata.people || [],
+                location: c.metadata.location || '',
+                isVerified: false,
+                verificationReason: 'Retrieved via semantic matching',
+                groupId: videoMap.get(c.videoId)?.groupId,
+                groupName: videoMap.get(c.videoId)?.groupName,
+              }));
+
+          return { segment: seg, matches: reranked.slice(0, 5) };
         })
       );
 
-      segmentSummaries = segmentResults.map(({ segment, matches: segMatches }: { segment: PromptSegment; matches: any[] }) => {
+      segmentSummaries = segmentResults.map(({ segment, matches }: { segment: PromptSegment; matches: RerankedSceneResult[] }) => {
         const matchedClipIds: string[] = [];
-        for (const sm of segMatches) {
+        for (const sm of matches) {
           matchedClipIds.push(sm.sceneId);
 
           if (!sceneMatchMap.has(sm.sceneId)) {
@@ -124,7 +164,7 @@ export async function POST(req: NextRequest) {
             segmentIndex: segment.index,
             segmentLabel: segment.label,
             segmentText: segment.text,
-            similarity: sm.similarity,
+            similarity: sm.similarityScore / 100,
           });
           sceneSegmentMap.set(sm.sceneId, existing);
         }
@@ -136,114 +176,97 @@ export async function POST(req: NextRequest) {
         };
       });
     } else {
+      // 1. Stage 1: AI Query Expansion (Synonyms, Visual Actions, & Entity Extraction)
+      const expansion = await searchService.expandQuery(trimmedQuery);
+      if (expansion.warning) warnings.push(expansion.warning);
+
+      // 2. Stage 2: Broad Hybrid Candidate Retrieval (Multi-Query Vector + Lexical Boost)
+      const candidates = await searchService.retrieveCandidates({
+        expansion,
+        videoIdFilter,
+        candidateLimit: Math.max(16, limit * 2),
+      });
+
+      // 3. Stage 3: AI Scene Re-Ranking & Exclusion Filter (LLM-as-a-Judge)
+      const reranked = autoVerify
+        ? await searchService.rerankAndFilter({
+            query: trimmedQuery,
+            candidates,
+            minConfidenceThreshold: 35,
+            onWarning: (w) => warnings.push(w),
+          })
+        : candidates.map((c) => ({
+            sceneId: c.sceneId,
+            videoId: c.videoId,
+            videoName: videoMap.get(c.videoId)?.filename || 'Unknown Video',
+            videoDuration: videoMap.get(c.videoId)?.duration || 0,
+            videoStoragePath: videoMap.get(c.videoId)?.storagePath || '',
+            thumbnailUrl: `/api/media/thumbnails/thumb_${c.videoId}.jpg`,
+            similarityScore: Math.round(c.similarity * 100),
+            confidenceScore: Math.round(c.similarity * 100),
+            startTime: c.metadata.startTime,
+            endTime: c.metadata.endTime,
+            verifiedStartTime: c.metadata.startTime,
+            verifiedEndTime: c.metadata.endTime,
+            duration: Math.round((c.metadata.endTime - c.metadata.startTime) * 10) / 10,
+            description: c.metadata.description,
+            actions: c.metadata.actions || [],
+            objects: c.metadata.objects || [],
+            people: c.metadata.people || [],
+            location: c.metadata.location || '',
+            isVerified: false,
+            verificationReason: 'Retrieved via semantic matching',
+            groupId: videoMap.get(c.videoId)?.groupId,
+            groupName: videoMap.get(c.videoId)?.groupName,
+          }));
+
+      const topResults = reranked.slice(0, limit);
+      for (const res of topResults) {
+        sceneMatchMap.set(res.sceneId, res);
+      }
+
       segmentSummaries = rawSegments.map((seg: PromptSegment) => ({
         ...seg,
-        matchedClipCount: globalMatches.length,
-        matchedClipIds: globalMatches.map((m) => m.sceneId),
+        matchedClipCount: topResults.length,
+        matchedClipIds: topResults.map((m) => m.sceneId),
       }));
 
-      for (const gm of globalMatches) {
-        sceneSegmentMap.set(gm.sceneId, [
+      for (const res of topResults) {
+        sceneSegmentMap.set(res.sceneId, [
           {
             segmentId: rawSegments[0]?.id || 'seg_0',
             segmentIndex: 1,
             segmentLabel: 'Part 1',
             segmentText: rawSegments[0]?.text || trimmedQuery,
-            similarity: gm.similarity,
+            similarity: res.similarityScore / 100,
           },
         ]);
       }
     }
 
-    // Combine candidate matches
-    const allCandidateMatches = Array.from(sceneMatchMap.values());
-    const maxRawSim = allCandidateMatches.length > 0
-      ? Math.max(...allCandidateMatches.map((m) => m.similarity))
-      : 1.0;
-    const isLocalScale = maxRawSim < 0.4;
+    // Combine candidate matches into final response format
+    const results = Array.from(sceneMatchMap.values()).map((item) => {
+      const segmentMatches = (sceneSegmentMap.get(item.sceneId) || []).sort(
+        (a, b) => b.similarity - a.similarity
+      );
+      const primarySegment = segmentMatches[0];
 
-    const results = await Promise.all(
-      allCandidateMatches.map(async (match) => {
-        const video = videoMap.get(match.videoId);
-        let verifiedStart = match.metadata.startTime;
-        let verifiedEnd = match.metadata.endTime;
-        let isVerified = false;
-
-        const similarityScore = isLocalScale
-          ? Math.min(98, Math.round((match.similarity / Math.max(0.08, maxRawSim)) * 92))
-          : Math.min(99, Math.round(match.similarity * 100));
-
-        let verifiedConfidence = similarityScore;
-        let verificationReason = 'Candidate retrieved from vector similarity.';
-
-        if (autoVerify) {
-          try {
-            const verification = await timestampVerificationService.verifyTimestamps({
-              query: trimmedQuery,
-              candidateStart: match.metadata.startTime,
-              candidateEnd: match.metadata.endTime,
-              sceneDescription: match.metadata.description,
-              videoId: match.videoId,
-              sceneId: match.sceneId,
-            });
-
-            if (verification.match) {
-              verifiedStart = verification.startTime;
-              verifiedEnd = verification.endTime;
-              verifiedConfidence = verification.confidence;
-              verificationReason = verification.reason;
-              isVerified = true;
-            }
-          } catch (e) {
-            console.warn('AI timestamp verification skipped for global search candidate:', e);
-          }
-        }
-
-        // Extract and sort segment associations for this clip
-        const segmentMatches = (sceneSegmentMap.get(match.sceneId) || []).sort(
-          (a, b) => b.similarity - a.similarity
-        );
-        const primarySegment = segmentMatches[0];
-
-        return {
-          sceneId: match.sceneId,
-          videoId: match.videoId,
-          videoName: video?.filename || 'Unknown Video',
-          videoDuration: video?.duration || 0,
-          videoStoragePath: video?.storagePath || '',
-          thumbnailUrl: `/api/media/thumbnails/thumb_${video?.id}.jpg`,
-          similarityScore,
-          confidenceScore: Math.round(isVerified ? verifiedConfidence * 100 : similarityScore),
-          startTime: match.metadata.startTime,
-          endTime: match.metadata.endTime,
-          verifiedStartTime: verifiedStart,
-          verifiedEndTime: verifiedEnd,
-          duration: Math.round((verifiedEnd - verifiedStart) * 10) / 10,
-          description: match.metadata.description,
-          actions: match.metadata.actions,
-          objects: match.metadata.objects,
-          people: match.metadata.people,
-          location: match.metadata.location,
-          isVerified,
-          verificationReason,
-          groupId: video?.groupId,
-          groupName: video?.groupName,
-          // Segment alignment attributes
-          matchedSegmentIds: segmentMatches.map((s) => s.segmentId),
-          segmentMatches,
-          primarySegmentId: primarySegment?.segmentId || null,
-          primarySegmentLabel: primarySegment?.segmentLabel || null,
-          primarySegmentText: primarySegment?.segmentText || null,
-        };
-      })
-    );
+      return {
+        ...item,
+        matchedSegmentIds: segmentMatches.map((s) => s.segmentId),
+        segmentMatches,
+        primarySegmentId: primarySegment?.segmentId || null,
+        primarySegmentLabel: primarySegment?.segmentLabel || null,
+        primarySegmentText: primarySegment?.segmentText || null,
+      };
+    });
 
     // Sort results by confidence / similarity
     results.sort((a, b) => b.confidenceScore - a.confidenceScore);
 
     const targetGroup = groupId && groupId !== 'all' ? db.getGroup(groupId) : undefined;
     const searchRecord: VideoSearch = {
-      id: `search_${uuidv4()}`,
+      id: costCtx.searchId!,
       query: trimmedQuery,
       groupId: groupId && groupId !== 'all' ? groupId : undefined,
       groupName: targetGroup?.name,
@@ -254,14 +277,20 @@ export async function POST(req: NextRequest) {
       isSegmented: isMultiSegment,
       createdAt: new Date().toISOString(),
     };
-    db.recordSearch(searchRecord);
+    if (saveHistory) {
+      db.recordSearch(searchRecord);
+    }
+
+    const uniqueWarnings = Array.from(new Set(warnings.filter(Boolean)));
 
     return NextResponse.json({
+      searchId: saveHistory ? searchRecord.id : undefined,
       query: trimmedQuery,
       count: results.length,
       results,
       segments: segmentSummaries,
       isSegmented: isMultiSegment,
+      warning: uniqueWarnings.length > 0 ? uniqueWarnings.join(' • ') : undefined,
     });
   } catch (err: any) {
     console.error('Global search error:', err);

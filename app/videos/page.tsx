@@ -20,20 +20,28 @@ import {
   Plus,
   Square,
   Tag,
-  ShieldCheck
+  ShieldCheck,
+  RotateCcw,
+  Sliders,
+  X
 } from 'lucide-react';
 import { formatTime } from '@/components/VideoPlayer';
 import BulkUploadQueueModal from '@/components/BulkUploadQueueModal';
 import GroupSelectDropdown from '@/components/GroupSelectDropdown';
+import ProcessingLogsConsole from '@/components/ProcessingLogsConsole';
+import ConfirmModal from '@/components/ConfirmModal';
+import AssignGroupModal from '@/components/AssignGroupModal';
 
 export default function VideosPage() {
   const [videos, setVideos] = useState<any[]>([]);
   const [groups, setGroups] = useState<any[]>([]);
+  const [jobs, setJobs] = useState<any[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<string>('all');
   const [loading, setLoading] = useState(true);
   const [dragActive, setDragActive] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState(false);
   const [fileDetails, setFileDetails] = useState<any | null>(null);
   const [singleUploadGroupId, setSingleUploadGroupId] = useState<string>('');
   const [uploading, setUploading] = useState(false);
@@ -44,7 +52,48 @@ export default function VideosPage() {
   const [activeJobsCount, setActiveJobsCount] = useState(0);
   const [isCreatingGroupInline, setIsCreatingGroupInline] = useState(false);
   const [inlineGroupName, setInlineGroupName] = useState('');
+  const [reprocessingId, setReprocessingId] = useState<string | null>(null);
+  const [deletingVideoId, setDeletingVideoId] = useState<string | null>(null);
+  const [groupModalVideo, setGroupModalVideo] = useState<any | null>(null);
+  const [confirmConfig, setConfirmConfig] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmText?: string;
+    cancelText?: string;
+    variant?: 'danger' | 'warning' | 'info';
+    iconType?: 'trash' | 'stop' | 'warning' | 'refresh';
+    onConfirm: () => void | Promise<void>;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+  });
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleReprocessVideo = async (videoId: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setReprocessingId(videoId);
+    try {
+      const res = await fetch(`/api/videos/${videoId}/reindex`, { method: 'POST' });
+      if (res.ok) {
+        setVideos((prev) =>
+          prev.map((v) =>
+            v.id === videoId
+              ? { ...v, status: 'processing', processingProgress: 5, errorMessage: undefined }
+              : v
+          )
+        );
+        fetchJobs();
+      }
+    } catch (err) {
+      console.error('Reprocess error:', err);
+    } finally {
+      setReprocessingId(null);
+    }
+  };
 
   const fetchVideos = async () => {
     try {
@@ -77,7 +126,9 @@ export default function VideosPage() {
       const res = await fetch('/api/jobs');
       if (res.ok) {
         const data = await res.json();
-        const active = (data.jobs || []).filter(
+        const jobList = data.jobs || [];
+        setJobs(jobList);
+        const active = jobList.filter(
           (j: any) => j.status === 'processing' || j.status === 'pending'
         ).length;
         setActiveJobsCount(active);
@@ -96,14 +147,82 @@ export default function VideosPage() {
   useEffect(() => {
     refreshAll();
     const interval = setInterval(refreshAll, 4000);
-    return () => clearInterval(interval);
+
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource('/api/events');
+      es.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.videoId) {
+            setVideos((prev) =>
+              prev.map((v) =>
+                v.id === payload.videoId
+                  ? {
+                      ...v,
+                      status: payload.status === 'completed' ? 'indexed' : payload.status,
+                      processingProgress: payload.progress ?? v.processingProgress,
+                    }
+                  : v
+              )
+            );
+            setJobs((prev) => {
+              const existingIdx = prev.findIndex((j) => j.id === payload.jobId);
+              const updatedJob = {
+                id: payload.jobId,
+                videoId: payload.videoId,
+                jobType: payload.jobType,
+                status: payload.status,
+                progress: payload.progress,
+                currentStep: payload.currentStep,
+                logs: payload.logs || [],
+                error: payload.error,
+                updatedAt: payload.timestamp,
+              };
+              if (existingIdx >= 0) {
+                const copy = [...prev];
+                copy[existingIdx] = updatedJob;
+                return copy;
+              }
+              return [updatedJob, ...prev];
+            });
+
+            if (payload.status === 'completed') {
+              refreshAll();
+            }
+          }
+        } catch {}
+      };
+    } catch {}
+
+    return () => {
+      clearInterval(interval);
+      if (es) es.close();
+    };
   }, []);
 
-  const handleFileSelect = (file: File) => {
+  const handleFileSelect = async (file: File) => {
     setErrorMsg(null);
     setSelectedFile(file);
     const url = URL.createObjectURL(file);
     setPreviewUrl(url);
+
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    let isNonWeb = ext === 'mkv' || ext === 'avi' || ext === 'mov' || ext === 'wmv' || ext === 'flv';
+    let detectedCodecLabel = isNonWeb ? ext?.toUpperCase() || 'Non-Web' : '';
+
+    // Inspect MP4 header box for HEVC / H.265 fourCC markers (hev1, hvc1, hevc)
+    try {
+      const slice = file.slice(0, 512 * 1024);
+      const buffer = await slice.arrayBuffer();
+      const text = new TextDecoder('latin1').decode(new Uint8Array(buffer));
+      if (text.includes('hev1') || text.includes('hvc1') || text.includes('hevc')) {
+        isNonWeb = true;
+        detectedCodecLabel = 'HEVC / H.265 MP4';
+      }
+    } catch {}
+
+    setPreviewError(isNonWeb);
 
     const tempVideo = document.createElement('video');
     tempVideo.preload = 'metadata';
@@ -115,7 +234,20 @@ export default function VideosPage() {
         duration: tempVideo.duration || 0,
         width: tempVideo.videoWidth || 1280,
         height: tempVideo.videoHeight || 720,
-        type: file.type || 'video/mp4',
+        type: detectedCodecLabel || file.type || `video/${ext || 'mp4'}`,
+        codecLabel: detectedCodecLabel,
+      });
+    };
+    tempVideo.onerror = () => {
+      setPreviewError(true);
+      setFileDetails({
+        name: file.name,
+        sizeMB: (file.size / (1024 * 1024)).toFixed(2),
+        duration: 0,
+        width: 1920,
+        height: 1080,
+        type: detectedCodecLabel || file.type || `video/${ext || 'mp4'}`,
+        codecLabel: detectedCodecLabel || 'HEVC / Non-Web',
       });
     };
   };
@@ -144,21 +276,22 @@ export default function VideosPage() {
 
     setUploading(true);
     setErrorMsg(null);
-    setUploadProgress(15);
-    setProcessingStage('Uploading video file...');
+    setUploadProgress(20);
+    setProcessingStage('Streaming video to server storage...');
 
     const formData = new FormData();
     formData.append('file', selectedFile);
     formData.append('autoIndex', 'true');
+    formData.append('async', 'true');
     if (singleUploadGroupId) {
       formData.append('groupId', singleUploadGroupId);
     }
 
     try {
-      setUploadProgress(50);
-      setProcessingStage('Extracting metadata & storing...');
+      setUploadProgress(60);
+      setProcessingStage('Starting AI indexing pipeline...');
 
-      const res = await fetch('/api/videos/upload', {
+      const res = await fetch('/api/videos/upload?async=true', {
         method: 'POST',
         body: formData,
       });
@@ -169,11 +302,11 @@ export default function VideosPage() {
       }
 
       setUploadProgress(100);
-      setProcessingStage('Indexing initiated! Redirecting to video studio...');
+      setProcessingStage('Upload complete! Redirecting to live studio monitor...');
       refreshAll();
       setTimeout(() => {
         window.location.href = `/videos/${data.video.id}`;
-      }, 1000);
+      }, 500);
     } catch (err: any) {
       setErrorMsg(err.message);
       setUploading(false);
@@ -181,22 +314,62 @@ export default function VideosPage() {
     }
   };
 
-  const handleDeleteVideo = async (videoId: string, e: React.MouseEvent) => {
+  const promptDeleteVideo = (videoId: string, filename: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!confirm('Are you sure you want to delete this video and all its scenes/embeddings?')) {
-      return;
-    }
+    setConfirmConfig({
+      isOpen: true,
+      title: 'Delete Video?',
+      message: `Are you sure you want to delete "${filename}" and all its scenes, embeddings, and transcripts? This action cannot be undone.`,
+      confirmText: 'Delete Video',
+      cancelText: 'Cancel',
+      variant: 'danger',
+      iconType: 'trash',
+      onConfirm: async () => {
+        await executeDeleteVideo(videoId);
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
+  };
+
+  const executeDeleteVideo = async (videoId: string) => {
+    setDeletingVideoId(videoId);
+    // Optimistically remove from state immediately
+    setVideos((prev) => prev.filter((v) => v.id !== videoId));
+    setJobs((prev) => prev.filter((j) => j.videoId !== videoId));
 
     try {
       const res = await fetch(`/api/videos/${videoId}`, { method: 'DELETE' });
-      if (res.ok) {
-        setVideos((prev) => prev.filter((v) => v.id !== videoId));
+      if (!res.ok) {
+        refreshAll();
+      } else {
         fetchGroups();
       }
     } catch (e) {
       console.error('Delete error:', e);
+      refreshAll();
+    } finally {
+      setDeletingVideoId(null);
     }
+  };
+
+  const promptCancelProcessing = (videoId: string, filename: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setConfirmConfig({
+      isOpen: true,
+      title: `Cancel Processing for "${filename}"?`,
+      message: 'Are you sure you want to stop processing and indexing this video? Ongoing AI tasks will be terminated.',
+      confirmText: 'Stop Processing',
+      cancelText: 'Keep Running',
+      variant: 'warning',
+      iconType: 'stop',
+      onConfirm: async () => {
+        await fetch(`/api/jobs/${videoId}/cancel`, { method: 'POST' });
+        refreshAll();
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
   };
 
   const handleCreateGroup = async (e: React.FormEvent) => {
@@ -228,6 +401,8 @@ export default function VideosPage() {
   const displayedVideos =
     activeGroupId === 'all'
       ? videos
+      : activeGroupId === 'ungrouped'
+      ? videos.filter((v) => !v.groupId)
       : videos.filter((v) => v.groupId === activeGroupId);
 
   return (
@@ -274,7 +449,7 @@ export default function VideosPage() {
           <input
             ref={fileInputRef}
             type="file"
-            accept="video/mp4,video/mkv,video/mov,video/webm,video/avi"
+            accept="video/*,.mp4,.mkv,.mov,.webm,.avi,.m4v,video/mp4,video/x-matroska,video/quicktime,video/webm,video/x-msvideo"
             className="hidden"
             onChange={(e) => {
               if (e.target.files && e.target.files[0]) {
@@ -292,7 +467,7 @@ export default function VideosPage() {
                 Click to browse or drag & drop video here
               </p>
               <p className="text-xs text-slate-500 mt-1">
-                Supports MP4, MKV, MOV, WEBM, AVI (including long videos up to 2 hours)
+                Supports MP4, MKV, MOV, WEBM, AVI (any duration / unlimited length with automatic stream splitting)
               </p>
             </div>
             <div className="pt-1">
@@ -316,14 +491,14 @@ export default function VideosPage() {
             <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
             <div>
               <span className="text-slate-500 block text-[11px]">Max File Size</span>
-              <span className="font-semibold text-slate-200">2 GB / video</span>
+              <span className="font-semibold text-slate-200">Unlimited (Chunked)</span>
             </div>
           </div>
           <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 flex items-center space-x-2.5">
             <Clock className="w-4 h-4 text-blue-400 shrink-0" />
             <div>
-              <span className="text-slate-500 block text-[11px]">Max Video Length</span>
-              <span className="font-semibold text-slate-200">Up to 2 hours</span>
+              <span className="text-slate-500 block text-[11px]">Video Duration</span>
+              <span className="font-semibold text-slate-200">Any Length (Auto-Split)</span>
             </div>
           </div>
           <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 flex items-center space-x-2.5">
@@ -362,10 +537,52 @@ export default function VideosPage() {
               </button>
             </div>
 
+            {/* Non-Web Format Auto-Transcoding Banner */}
+            {previewError && (
+              <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/40 via-indigo-950/30 to-slate-900/60 border border-amber-500/40 flex items-start gap-3.5 text-xs">
+                <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0 mt-0.5">
+                  <Sparkles className="w-4 h-4" />
+                </div>
+                <div className="space-y-1.5 min-w-0">
+                  <p className="font-bold text-amber-300 text-sm">
+                    This format is currently not supported for direct browser preview ({fileDetails.codecLabel || fileDetails.name.split('.').pop()?.toUpperCase()})
+                  </p>
+                  <p className="text-slate-300 text-xs leading-relaxed">
+                    Raw {fileDetails.codecLabel || fileDetails.name.split('.').pop()?.toUpperCase()} files cannot be decoded directly inside standard web browsers prior to upload.
+                  </p>
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-semibold text-xs mt-1">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>When you upload, it will be automatically converted to a supported web format (H.264).</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="grid grid-cols-1 md:grid-cols-3 gap-5 items-center">
               {previewUrl && (
-                <div className="aspect-video rounded-xl overflow-hidden bg-black border border-slate-800">
-                  <video src={previewUrl} controls className="w-full h-full object-contain" />
+                <div className="aspect-video rounded-xl overflow-hidden bg-slate-950 border border-slate-800 flex items-center justify-center relative p-3">
+                  {!previewError ? (
+                    <video
+                      src={previewUrl}
+                      controls
+                      onError={() => setPreviewError(true)}
+                      className="w-full h-full object-contain"
+                    />
+                  ) : (
+                    <div className="p-4 text-center space-y-2.5 max-w-sm">
+                      <div className="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-400 flex items-center justify-center mx-auto">
+                        <Film className="w-4 h-4" />
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-xs font-bold text-amber-300">
+                          This format is currently not supported for browser preview ({fileDetails.codecLabel || fileDetails.name.split('.').pop()?.toUpperCase()})
+                        </p>
+                        <p className="text-[11px] text-slate-300 leading-snug">
+                          When you upload, it will be automatically converted to supported web format (H.264).
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -381,27 +598,21 @@ export default function VideosPage() {
                   <span className="font-semibold text-slate-200 block mt-0.5">{fileDetails.sizeMB} MB</span>
                 </div>
                 <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800">
-                  <span className="text-slate-500 block">Est. Duration</span>
-                  <span className="font-semibold text-slate-200 block mt-0.5">{formatTime(fileDetails.duration)}</span>
+                  <span className="text-slate-500 block">Format</span>
+                  <span className="font-semibold text-indigo-300 uppercase block mt-0.5">
+                    {fileDetails.name.split('.').pop() || 'Video'}
+                  </span>
                 </div>
                 <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800">
-                  <span className="text-slate-500 block">Resolution</span>
-                  <span className="font-semibold text-slate-200 block mt-0.5">
-                    {fileDetails.width}x{fileDetails.height}
+                  <span className="text-slate-500 block">Conversion</span>
+                  <span className="font-semibold text-emerald-400 block mt-0.5">
+                    {previewError ? '⚡ Auto H.264' : '✅ Web Native'}
                   </span>
                 </div>
               </div>
             </div>
 
-            {/* Over 2 GB Limit Warning Banner */}
-            {selectedFile && selectedFile.size > 2 * 1024 * 1024 * 1024 && (
-              <div className="p-3.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-xs flex items-center space-x-2.5">
-                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
-                <span>
-                  <strong>Google File API limit exceeded:</strong> This video is {(selectedFile.size / (1024 * 1024 * 1024)).toFixed(2)} GB. Google allows a maximum of <strong>2 GB</strong> per video upload. Please trim or compress the video before uploading.
-                </span>
-              </div>
-            )}
+
 
             {/* Show / Group Selection for Single Upload */}
             <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800/80 flex flex-wrap items-center justify-between gap-3 text-xs">
@@ -435,7 +646,7 @@ export default function VideosPage() {
               </div>
               <button
                 onClick={handleUpload}
-                disabled={uploading || (selectedFile && selectedFile.size > 2 * 1024 * 1024 * 1024)}
+                disabled={uploading}
                 className="w-full sm:w-auto flex items-center justify-center space-x-2 px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-xl shadow-lg shadow-blue-500/20 transition-all disabled:opacity-50"
               >
                 <Upload className="w-4 h-4" />
@@ -507,6 +718,24 @@ export default function VideosPage() {
               activeGroupId === 'all' ? 'bg-blue-500 text-white' : 'bg-slate-800 text-slate-400'
             }`}>
               {videos.length}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveGroupId('ungrouped')}
+            className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-all flex items-center space-x-2 ${
+              activeGroupId === 'ungrouped'
+                ? 'bg-amber-600 text-white shadow-md shadow-amber-500/20'
+                : 'bg-slate-900/80 text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-slate-800'
+            }`}
+            title="Videos not assigned to any show or group"
+          >
+            <Layers className="w-3.5 h-3.5" />
+            <span>No Group (Ungrouped)</span>
+            <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+              activeGroupId === 'ungrouped' ? 'bg-amber-500 text-white' : 'bg-slate-800 text-slate-400'
+            }`}>
+              {videos.filter((v) => !v.groupId).length}
             </span>
           </button>
 
@@ -642,16 +871,25 @@ export default function VideosPage() {
               >
                 <div>
                   {/* Thumbnail / Header */}
-                  <div className="relative aspect-video bg-slate-950 overflow-hidden">
-                    <img
-                      src={`/api/media/thumbnails/thumb_${video.id}.jpg`}
-                      alt={video.filename}
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).style.display = 'none';
-                      }}
-                    />
-                    <div className="absolute top-3 left-3 flex flex-wrap gap-1.5">
+                  <div className="relative aspect-video bg-slate-950 overflow-hidden group/thumb">
+                    <Link
+                      href={`/videos/${video.id}`}
+                      className="block w-full h-full cursor-pointer"
+                      title="Open in Video Studio"
+                    >
+                      <img
+                        src={`/api/media/thumbnails/thumb_${video.id}.jpg`}
+                        alt={video.filename}
+                        className="w-full h-full object-cover group-hover/thumb:scale-105 transition-transform duration-300"
+                        onError={(e) => {
+                          (e.target as HTMLImageElement).style.display = 'none';
+                        }}
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-black/20 pointer-events-none" />
+                    </Link>
+
+                    {/* Top Badges (Outside Link to avoid router redirect) */}
+                    <div className="absolute top-3 left-3 z-10 flex flex-wrap items-center gap-1.5 pointer-events-auto">
                       <span
                         className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-md backdrop-blur-md ${
                           video.status === 'indexed'
@@ -672,23 +910,50 @@ export default function VideosPage() {
                           : video.status}
                       </span>
 
-                      {video.groupName && (
-                        <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-indigo-900/80 text-indigo-200 backdrop-blur-md border border-indigo-500/30 flex items-center space-x-1">
-                          <Folder className="w-3 h-3 text-indigo-400" />
+                      {video.groupName ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setGroupModalVideo(video);
+                          }}
+                          className="text-[10px] font-semibold px-2 py-1 rounded-md bg-indigo-900/90 hover:bg-indigo-800 text-indigo-200 hover:text-white backdrop-blur-md border border-indigo-500/40 flex items-center space-x-1 transition-all cursor-pointer group/grp shadow-sm"
+                          title={`Assigned to show "${video.groupName}". Click to change or remove from group.`}
+                        >
+                          <Folder className="w-3 h-3 text-indigo-400 group-hover/grp:scale-110 transition-transform" />
                           <span className="truncate max-w-[120px]">{video.groupName}</span>
-                        </span>
+                          <span className="text-[9px] text-indigo-300 ml-0.5 opacity-70 group-hover/grp:opacity-100">✎</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setGroupModalVideo(video);
+                          }}
+                          className="text-[10px] font-medium px-2 py-1 rounded-md bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white border border-dashed border-slate-600 hover:border-slate-400 flex items-center space-x-1 transition-all cursor-pointer shadow-sm"
+                          title="No group assigned. Click to add to a show or group."
+                        >
+                          <Plus className="w-2.5 h-2.5 text-blue-400" />
+                          <span>Add Group</span>
+                        </button>
                       )}
                     </div>
-                    <div className="absolute bottom-3 right-3 px-2 py-0.5 rounded bg-black/80 text-xs font-mono text-slate-200 backdrop-blur-sm">
+
+                    <div className="absolute bottom-3 right-3 z-10 px-2 py-0.5 rounded bg-black/80 text-xs font-mono text-slate-200 backdrop-blur-sm pointer-events-none">
                       {formatTime(video.duration)}
                     </div>
                   </div>
 
                   {/* Body Info */}
                   <div className="p-5 space-y-3">
-                    <h3 className="font-semibold text-white text-base line-clamp-1 group-hover:text-blue-400 transition-colors">
-                      {video.filename}
-                    </h3>
+                    <Link href={`/videos/${video.id}`} className="block">
+                      <h3 className="font-semibold text-white text-base line-clamp-1 hover:text-blue-400 transition-colors">
+                        {video.filename}
+                      </h3>
+                    </Link>
 
                     <div className="grid grid-cols-2 gap-2 text-xs text-slate-400">
                       <div className="flex items-center space-x-1.5">
@@ -701,20 +966,37 @@ export default function VideosPage() {
                       </div>
                     </div>
 
-                    {video.status === 'processing' && (
-                      <div className="space-y-1 pt-1">
-                        <div className="flex justify-between text-[11px] text-amber-400">
-                          <span>Indexing video...</span>
-                          <span>{video.processingProgress}%</span>
-                        </div>
-                        <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                          <div
-                            className="bg-amber-500 h-full rounded-full transition-all duration-300"
-                            style={{ width: `${video.processingProgress}%` }}
+                    {video.status === 'processing' && (() => {
+                      const videoJob = jobs.find(
+                        (j) => j.videoId === video.id && (j.status === 'processing' || j.status === 'pending')
+                      );
+                      return (
+                        <div className="space-y-2 pt-1">
+                          <div className="flex justify-between items-center text-[11px] text-amber-400">
+                            <span className="truncate pr-2 font-medium">
+                              {videoJob?.currentStep || 'Processing video stream...'}
+                            </span>
+                            <span className="font-mono font-bold shrink-0">{video.processingProgress}%</span>
+                          </div>
+                          <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                            <div
+                              className="bg-gradient-to-r from-amber-500 to-indigo-500 h-full rounded-full transition-all duration-300"
+                              style={{ width: `${video.processingProgress}%` }}
+                            />
+                          </div>
+
+                          <ProcessingLogsConsole
+                            logs={videoJob?.logs || []}
+                            currentStep={videoJob?.currentStep}
+                            progress={video.processingProgress}
+                            status="processing"
+                            isCompact={true}
+                            defaultExpanded={false}
+                            title="Live Step Logs"
                           />
                         </div>
-                      </div>
-                    )}
+                      );
+                    })()}
 
                     {video.status === 'failed' && (
                       <div className="flex items-start gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30">
@@ -763,25 +1045,92 @@ export default function VideosPage() {
                       </>
                     )}
                     {(video.status === 'processing' || video.status === 'pending') && (
-                      <span className="text-[11px] text-amber-400/80 italic flex items-center gap-1.5">
-                        <RefreshCw className="w-3 h-3 animate-spin" />
-                        Processing — actions available after indexing
-                      </span>
+                      <div className="flex items-center space-x-2">
+                        <Link
+                          href={`/videos/${video.id}`}
+                          className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white text-xs font-semibold border border-amber-500/30 transition-all shadow-sm group/btn"
+                          title="Open Studio to view live processing details, terminal logs, and video"
+                        >
+                          <Play className="w-3.5 h-3.5 fill-current group-hover/btn:scale-110 transition-transform" />
+                          <span>Studio</span>
+                        </Link>
+
+                        <span className="text-[11px] text-amber-400/80 italic flex items-center gap-1.5 font-medium px-2 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20">
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                          <span>Processing ({video.processingProgress}%)</span>
+                        </span>
+
+                        <button
+                          type="button"
+                          onClick={(e) => promptCancelProcessing(video.id, video.filename || video.title, e)}
+                          className="px-2 py-1 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs font-medium border border-red-500/30 transition-colors flex items-center space-x-1"
+                          title="Cancel background indexing and stop processing"
+                        >
+                          <X className="w-3 h-3" />
+                          <span>Cancel</span>
+                        </button>
+                      </div>
                     )}
                     {(video.status === 'failed' || video.status === 'cancelled') && (
-                      <span className="text-[11px] text-slate-400 italic">
-                        {video.status === 'cancelled' ? 'Indexing halted' : 'Delete and re-upload'}
-                      </span>
+                      <div className="flex items-center space-x-2">
+                        <button
+                          type="button"
+                          onClick={(e) => handleReprocessVideo(video.id, e)}
+                          disabled={reprocessingId === video.id}
+                          className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white text-xs font-semibold border border-amber-500/30 transition-all shadow-sm"
+                          title="Re-add this video to the AI processing queue"
+                        >
+                          <RotateCcw className={`w-3.5 h-3.5 ${reprocessingId === video.id ? 'animate-spin' : ''}`} />
+                          <span>{reprocessingId === video.id ? 'Queuing...' : 'Reprocess Video'}</span>
+                        </button>
+
+                        <Link
+                          href="/config"
+                          className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-medium border border-slate-700 transition-colors"
+                          title="Open AI Config to configure Gemini API Key"
+                        >
+                          <Sliders className="w-3 h-3 text-indigo-400" />
+                          <span>AI Config</span>
+                        </Link>
+
+                        <Link
+                          href={`/videos/${video.id}`}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                          title="Open Studio"
+                        >
+                          <Play className="w-3.5 h-3.5" />
+                        </Link>
+                      </div>
                     )}
                   </div>
 
-                  <button
-                    onClick={(e) => handleDeleteVideo(video.id, e)}
-                    className="p-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                    title="Delete video"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center space-x-1">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setGroupModalVideo(video);
+                      }}
+                      className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-300 hover:bg-slate-800 transition-colors"
+                      title={video.groupName ? `Manage group (${video.groupName})` : 'Assign to show / group'}
+                    >
+                      <Folder className="w-4 h-4" />
+                    </button>
+
+                    <button
+                      onClick={(e) => promptDeleteVideo(video.id, video.filename || video.title, e)}
+                      disabled={deletingVideoId === video.id}
+                      className="p-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                      title={deletingVideoId === video.id ? 'Deleting video...' : 'Delete video'}
+                    >
+                      {deletingVideoId === video.id ? (
+                        <RefreshCw className="w-4 h-4 animate-spin text-red-400" />
+                      ) : (
+                        <Trash2 className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}
@@ -796,6 +1145,31 @@ export default function VideosPage() {
         onUploadSuccess={refreshAll}
         groups={groups}
         onRefreshGroups={fetchGroups}
+      />
+
+      {/* Custom Confirmation Modal */}
+      <ConfirmModal
+        isOpen={confirmConfig.isOpen}
+        title={confirmConfig.title}
+        message={confirmConfig.message}
+        confirmText={confirmConfig.confirmText}
+        cancelText={confirmConfig.cancelText}
+        variant={confirmConfig.variant}
+        iconType={confirmConfig.iconType}
+        onConfirm={confirmConfig.onConfirm}
+        onClose={() => setConfirmConfig((prev) => ({ ...prev, isOpen: false }))}
+      />
+
+      {/* Assign / Change / Remove Group Modal */}
+      <AssignGroupModal
+        isOpen={Boolean(groupModalVideo)}
+        video={groupModalVideo}
+        groups={groups}
+        onClose={() => setGroupModalVideo(null)}
+        onSuccess={() => {
+          refreshAll();
+          fetchGroups();
+        }}
       />
     </div>
   );

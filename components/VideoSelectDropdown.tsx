@@ -49,10 +49,12 @@ export default function VideoSelectDropdown({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Filter videos by groupId if selectedGroupId is specified and not 'all'
+  // Filter videos by groupId if selectedGroupId is specified and not 'all',
+  // and strictly ensure only indexed videos are shown in scope
   const scopedVideos = useMemo(() => {
-    if (!selectedGroupId || selectedGroupId === 'all') return videos;
-    return videos.filter((v) => v.groupId === selectedGroupId);
+    const indexed = videos.filter((v) => !v.status || v.status === 'indexed');
+    if (!selectedGroupId || selectedGroupId === 'all') return indexed;
+    return indexed.filter((v) => v.groupId === selectedGroupId);
   }, [videos, selectedGroupId]);
 
   const filteredVideos = useMemo(() => {

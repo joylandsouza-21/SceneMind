@@ -92,7 +92,7 @@ export default function DashboardPage() {
             AI-Powered Video Indexing & Semantic Video Clipping
           </h1>
           <p className="text-slate-300 text-sm leading-relaxed">
-            Index long videos up to 2 hours into searchable multimodal scenes. Query using natural language, verify exact temporal boundaries with AI, and extract sub-clips in seconds.
+            Index videos of any length into searchable multimodal scenes with automatic stream splitting. Query using natural language, verify exact temporal boundaries with AI, and extract sub-clips in seconds.
           </p>
 
           <div className="flex flex-wrap gap-3 pt-2">

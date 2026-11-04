@@ -1,6 +1,7 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { TIMESTAMP_VERIFICATION_SYSTEM_PROMPT, buildTimestampVerificationPrompt } from '../../prompts/timestamp-verification';
 import { pricingService } from './pricing.service';
+import { aiConfigService, normalizeAnthropicModel } from './ai-config.service';
 
 export interface TimestampVerificationResult {
   match: boolean;
@@ -14,17 +15,6 @@ export interface TimestampVerificationResult {
 }
 
 export class TimestampVerificationService {
-  private genAI: GoogleGenerativeAI | null = null;
-  private modelName: string;
-
-  constructor() {
-    const apiKey = process.env.GEMINI_API_KEY;
-    this.modelName = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
-    if (apiKey && apiKey.trim() !== '') {
-      this.genAI = new GoogleGenerativeAI(apiKey);
-    }
-  }
-
   public async verifyTimestamps(params: {
     query: string;
     candidateStart: number;
@@ -41,14 +31,18 @@ export class TimestampVerificationService {
       params.sceneDescription
     );
 
-    if (this.genAI) {
+    const config = aiConfigService.getEffectiveConfig('timestamp_verification');
+
+    // 1. Google Gemini
+    if (config.provider === 'gemini' && config.apiKey) {
       try {
-        const model = this.genAI.getGenerativeModel({
-          model: this.modelName,
+        const genAI = new GoogleGenerativeAI(config.apiKey);
+        const model = genAI.getGenerativeModel({
+          model: config.modelName || 'gemini-3.8-flash',
           systemInstruction: TIMESTAMP_VERIFICATION_SYSTEM_PROMPT,
           generationConfig: {
             responseMimeType: 'application/json',
-            temperature: 0.1,
+            temperature: config.temperature ?? 0.1,
           },
         });
 
@@ -57,14 +51,19 @@ export class TimestampVerificationService {
         const latencyMs = Date.now() - startTimeMs;
 
         const parsed = this.parseVerificationResponse(text, params.candidateStart, params.candidateEnd);
-        const inputTokens = Math.round(prompt.length / 4) + 120;
-        const outputTokens = Math.round(text.length / 4);
-        const estimatedCost = pricingService.calculateTextAiCost(this.modelName, inputTokens, outputTokens);
+        const usage = (response.response as any)?.usageMetadata;
+        const inputTokens = typeof usage?.promptTokenCount === 'number'
+          ? usage.promptTokenCount
+          : Math.round(prompt.length / 4) + 120;
+        const outputTokens = typeof usage?.candidatesTokenCount === 'number'
+          ? usage.candidatesTokenCount
+          : Math.round(text.length / 4);
+        const estimatedCost = pricingService.calculateTextAiCost(config.modelName, inputTokens, outputTokens);
 
         pricingService.recordOperationCost({
           videoId: params.videoId,
           sceneId: params.sceneId,
-          model: this.modelName,
+          model: config.modelName,
           inputTokens,
           outputTokens,
           estimatedCost,
@@ -76,10 +75,129 @@ export class TimestampVerificationService {
           ...parsed,
           latencyMs,
           estimatedCost,
-          model: this.modelName,
+          model: config.modelName,
         };
       } catch (err: any) {
-        console.warn(`Gemini timestamp verification failed: ${err.message}. Using high-precision heuristic verification.`);
+        console.warn(`Gemini verification failed: ${err.message}.`);
+      }
+    }
+
+    // 2. Anthropic Claude
+    if (config.provider === 'anthropic' && config.apiKey) {
+      try {
+        const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/v1/messages` : 'https://api.anthropic.com/v1/messages';
+        const modelId = normalizeAnthropicModel(config.modelName, 'claude-3-5-sonnet-20241022');
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': config.apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: modelId,
+            system: TIMESTAMP_VERIFICATION_SYSTEM_PROMPT,
+            messages: [{ role: 'user', content: prompt + '\nRespond with valid JSON only.' }],
+            max_tokens: 300,
+            temperature: config.temperature ?? 0.1,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          const text = data.content?.[0]?.text || '';
+          const latencyMs = Date.now() - startTimeMs;
+          const parsed = this.parseVerificationResponse(text, params.candidateStart, params.candidateEnd);
+          
+          const inputTokens = data.usage?.input_tokens || (Math.round(prompt.length / 4) + 120);
+          const outputTokens = data.usage?.output_tokens || Math.round(text.length / 4);
+          const estimatedCost = pricingService.calculateTextAiCost(modelId, inputTokens, outputTokens);
+
+          pricingService.recordOperationCost({
+            videoId: params.videoId,
+            sceneId: params.sceneId,
+            model: modelId,
+            inputTokens,
+            outputTokens,
+            estimatedCost,
+            processingTimeMs: latencyMs,
+            requestType: 'TIMESTAMP_VERIFICATION',
+          });
+
+          return {
+            ...parsed,
+            latencyMs,
+            estimatedCost,
+            model: modelId,
+          };
+        }
+      } catch (err: any) {
+        console.warn(`Anthropic verification failed: ${err.message}.`);
+      }
+    }
+
+    // 3. OpenAI / Groq / Ollama / Custom
+    if ((config.provider === 'openai' || config.provider === 'groq' || config.provider === 'ollama' || config.provider === 'custom') && (config.apiKey || config.provider === 'ollama')) {
+      try {
+        const url = config.baseUrl
+          ? `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`
+          : config.provider === 'groq'
+          ? 'https://api.groq.com/openai/v1/chat/completions'
+          : config.provider === 'ollama'
+          ? 'http://localhost:11434/v1/chat/completions'
+          : 'https://api.openai.com/v1/chat/completions';
+
+        const activeModel = config.modelName || (config.provider === 'groq' ? 'llama-3.3-70b-versatile' : 'gpt-4o-mini');
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (config.apiKey && config.provider !== 'ollama') {
+          headers['Authorization'] = `Bearer ${config.apiKey}`;
+        }
+
+        const res = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            model: activeModel,
+            messages: [
+              { role: 'system', content: TIMESTAMP_VERIFICATION_SYSTEM_PROMPT },
+              { role: 'user', content: prompt + '\nReturn JSON only.' }
+            ],
+            response_format: { type: 'json_object' },
+            temperature: config.temperature ?? 0.1,
+            max_tokens: 300,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          const text = data.choices?.[0]?.message?.content || '';
+          const latencyMs = Date.now() - startTimeMs;
+          const parsed = this.parseVerificationResponse(text, params.candidateStart, params.candidateEnd);
+          
+          const inputTokens = data.usage?.prompt_tokens || (Math.round(prompt.length / 4) + 120);
+          const outputTokens = data.usage?.completion_tokens || Math.round(text.length / 4);
+          const estimatedCost = pricingService.calculateTextAiCost(activeModel, inputTokens, outputTokens);
+
+          pricingService.recordOperationCost({
+            videoId: params.videoId,
+            sceneId: params.sceneId,
+            model: activeModel,
+            inputTokens,
+            outputTokens,
+            estimatedCost,
+            processingTimeMs: latencyMs,
+            requestType: 'TIMESTAMP_VERIFICATION',
+          });
+
+          return {
+            ...parsed,
+            latencyMs,
+            estimatedCost,
+            model: activeModel,
+          };
+        }
+      } catch (err: any) {
+        console.warn(`${config.provider.toUpperCase()} verification failed: ${err.message}.`);
       }
     }
 
@@ -130,10 +248,10 @@ export class TimestampVerificationService {
       const data = JSON.parse(clean.trim());
 
       const match = Boolean(data.match);
-      const startTime = typeof data.startTime === 'number' ? Math.max(0, data.startTime) : originalStart;
-      const endTime = typeof data.endTime === 'number' ? Math.max(startTime + 1, data.endTime) : originalEnd;
+      const startTime = originalStart;
+      const endTime = originalEnd;
       const confidence = typeof data.confidence === 'number' ? Math.min(1, Math.max(0, data.confidence)) : 0.92;
-      const reason = String(data.reason || 'Timestamp boundaries verified against requested semantic action.');
+      const reason = String(data.reason || 'Verified match against indexed scene.');
 
       return { match, startTime, endTime, confidence, reason };
     } catch (err) {

@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { pricingService } from './pricing.service';
+import { aiConfigService, normalizeAnthropicModel } from './ai-config.service';
 
 export interface SceneMetadataForEmbedding {
   description: string;
@@ -21,56 +22,51 @@ export interface PromptSegment {
   endIndex: number;
 }
 
-export function segmentPrompt(query: string): PromptSegment[] {
+/**
+ * Splits a single line/block into sentences, stripping any leading bullet or numbering.
+ */
+export function splitIntoSentences(block: string): string[] {
+  // Strip bullet points or leading numbering: "1.", "1)", "- ", "* ", "Step 1:"
+  const cleanedBlock = block.trim().replace(/^(?:\d+[\.\)]\s*|[-*•]\s*|(?:part|scene|step)\s*\d+[:\.\s-]*)/i, '').trim();
+  if (!cleanedBlock) return [];
+
+  // Split block into individual sentences by punctuation (. ! ? ; or em-dash)
+  const blockSentences = cleanedBlock
+    .split(/(?<=[.!?;\n])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  return blockSentences.length > 0 ? blockSentences : [cleanedBlock];
+}
+
+/**
+ * Splits a prompt into paragraphs, each represented as a list of sentences.
+ * Paragraphs are separated by blank lines; if the prompt has no blank lines,
+ * every non-empty line is treated as its own paragraph.
+ */
+export function splitPromptIntoParagraphs(query: string): string[][] {
   const trimmed = query.trim();
   if (!trimmed) return [];
 
-  // Check if query has multiple explicit lines
-  const rawLines = trimmed
-    .split(/\r?\n+/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
+  const paragraphSeparator = /\r?\n[ \t]*\r?\n/;
+  const hasBlankLines = paragraphSeparator.test(trimmed);
+  const blocks = trimmed
+    .split(hasBlankLines ? /(?:\r?\n[ \t]*){2,}/ : /\r?\n+/)
+    .map((b) => b.trim())
+    .filter((b) => b.length > 0);
 
-  let candidates: string[] = [];
-  if (rawLines.length >= 2) {
-    candidates = rawLines;
-  } else {
-    // Split by sentence delimiters: '.', '!', '?', or ';' followed by space or end
-    const sentences = trimmed
-      .split(/(?<=[.!?;\n])\s+/)
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
+  return blocks
+    .map((block) => block.split(/\r?\n+/).flatMap((line) => splitIntoSentences(line)))
+    .filter((sentences) => sentences.length > 0);
+}
 
-    if (sentences.length >= 2) {
-      candidates = sentences;
-    } else {
-      candidates = [trimmed];
-    }
-  }
-
-  // Strip leading list numbering and merge overly tiny fragments
-  const merged: string[] = [];
-  for (const c of candidates) {
-    const cleaned = c.replace(/^(?:\d+[\.\)]\s*|[-*•]\s*)/, '').trim();
-    if (!cleaned) continue;
-
-    if (
-      merged.length > 0 &&
-      cleaned.split(/\s+/).length <= 2 &&
-      merged[merged.length - 1].split(/\s+/).length < 20
-    ) {
-      merged[merged.length - 1] += ' ' + cleaned;
-    } else {
-      merged.push(cleaned);
-    }
-  }
-
-  if (merged.length === 0) {
-    merged.push(trimmed);
-  }
-
+/**
+ * Converts ordered chunk texts into PromptSegment objects with character offsets.
+ */
+export function buildPromptSegments(fullText: string, chunks: string[]): PromptSegment[] {
+  const trimmed = fullText.trim();
   let searchCursor = 0;
-  return merged.map((text, idx) => {
+  return chunks.map((text, idx) => {
     const startIndex = trimmed.indexOf(text, searchCursor);
     const endIndex = startIndex !== -1 ? startIndex + text.length : searchCursor + text.length;
     searchCursor = Math.max(searchCursor, endIndex);
@@ -88,18 +84,63 @@ export function segmentPrompt(query: string): PromptSegment[] {
   });
 }
 
-export class EmbeddingService {
-  private genAI: GoogleGenerativeAI | null = null;
-  private modelName: string;
+export function segmentPrompt(query: string): PromptSegment[] {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
 
-  constructor() {
-    const apiKey = process.env.GEMINI_API_KEY;
-    this.modelName = process.env.GEMINI_EMBEDDING_MODEL || 'text-embedding-004';
-    if (apiKey && apiKey.trim() !== '') {
-      this.genAI = new GoogleGenerativeAI(apiKey);
+  // Step 1: Split into raw lines / paragraphs / list items, then into sentences
+  const sentences: string[] = trimmed
+    .split(/\r?\n+/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .flatMap((block) => splitIntoSentences(block));
+
+  // Step 2: Group sentences into scene-sized chunks
+  const sceneChunks = chunkSentences(sentences);
+
+  // Fallback if empty
+  if (sceneChunks.length === 0) {
+    sceneChunks.push(trimmed);
+  }
+
+  return buildPromptSegments(trimmed, sceneChunks);
+}
+
+/**
+ * Groups sentences into ideal scene-sized chunks (1-2 sentences, ~15-35 words per part).
+ */
+export function chunkSentences(sentences: string[]): string[] {
+  const sceneChunks: string[] = [];
+  let currentChunk = '';
+
+  for (const sentence of sentences) {
+    const cleaned = sentence.replace(/^(?:\d+[\.\)]\s*|[-*•]\s*)/, '').trim();
+    if (!cleaned) continue;
+
+    const sentenceWordCount = cleaned.split(/\s+/).filter(Boolean).length;
+    const currentWordCount = currentChunk ? currentChunk.split(/\s+/).filter(Boolean).length : 0;
+
+    // If current chunk is empty, start with this sentence
+    if (!currentChunk) {
+      currentChunk = cleaned;
+    } else if (currentWordCount + sentenceWordCount <= 35 && currentWordCount < 20) {
+      // Merge into 2-sentence scene beat if word count is compact (<35 words total)
+      currentChunk += ' ' + cleaned;
+    } else {
+      // Otherwise push current chunk as a discrete scene beat and start new chunk
+      sceneChunks.push(currentChunk);
+      currentChunk = cleaned;
     }
   }
 
+  if (currentChunk) {
+    sceneChunks.push(currentChunk);
+  }
+
+  return sceneChunks;
+}
+
+export class EmbeddingService {
   public buildCanonicalText(meta: SceneMetadataForEmbedding): string {
     const lines = [
       `Scene:\n${meta.description.trim()}`,
@@ -118,19 +159,36 @@ export class EmbeddingService {
   ): Promise<{ embedding: number[]; dimensions: number; cost: number; latencyMs: number }> {
     const start = Date.now();
     const tokenCountEstimate = Math.ceil(text.length / 4);
+    const config = aiConfigService.getEffectiveConfig('embedding');
 
-    if (this.genAI) {
+    // 1. Google Gemini Embeddings
+    if (config.provider === 'gemini' && config.apiKey) {
       try {
-        const model = this.genAI.getGenerativeModel({ model: this.modelName });
-        const result = await model.embedContent(text);
-        const vector = result.embedding.values;
+        const genAI = new GoogleGenerativeAI(config.apiKey);
+        const model = genAI.getGenerativeModel({ model: config.modelName || 'gemini-embedding-001' });
+        let vector: number[];
+        try {
+          const result = await model.embedContent({
+            content: { role: 'user', parts: [{ text }] },
+            outputDimensionality: 768,
+          } as any);
+          vector = result.embedding.values;
+        } catch {
+          const result = await model.embedContent(text);
+          vector = result.embedding.values;
+        }
+
+        if (vector.length > 768) {
+          vector = this.normalizeVector(vector.slice(0, 768));
+        }
+
         const latencyMs = Date.now() - start;
         const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate);
 
         pricingService.recordOperationCost({
           videoId: context?.videoId,
           sceneId: context?.sceneId,
-          model: this.modelName,
+          model: config.modelName,
           inputTokens: tokenCountEstimate,
           outputTokens: 0,
           estimatedCost: cost,
@@ -149,10 +207,278 @@ export class EmbeddingService {
       }
     }
 
+    // 2. Anthropic Claude Semantic Embedding (Deep semantic extraction to 768d unit vector)
+    if (config.provider === 'anthropic' && config.apiKey) {
+      try {
+        const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/v1/messages` : 'https://api.anthropic.com/v1/messages';
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': config.apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: normalizeAnthropicModel(config.modelName, 'claude-3-5-haiku-20241022'),
+            max_tokens: 300,
+            system: 'You are an AI semantic embedding encoder. Return a JSON object with top semantic weighted terms, actions, objects, and concepts.',
+            messages: [
+              {
+                role: 'user',
+                content: `Analyze the following text for video vector search and extract the top weighted semantic concepts and keywords (nouns, verbs, themes, visual elements):\n"${text}"\n\nRespond ONLY with valid JSON in this exact structure:\n{"terms": [{"term": "action_or_keyword", "weight": 3.0}]}`,
+              },
+            ],
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          const responseText = data.content?.[0]?.text || '{}';
+          const cleanJson = responseText.replace(/```json\s*|\s*```/g, '').trim();
+          let parsed: { terms?: Array<{ term: string; weight: number }> } = {};
+          try {
+            parsed = JSON.parse(cleanJson);
+          } catch {
+            // ignore json parse error
+          }
+
+          const weightedTerms: Record<string, number> = {};
+          if (Array.isArray(parsed.terms)) {
+            for (const item of parsed.terms) {
+              if (item.term && typeof item.weight === 'number') {
+                weightedTerms[item.term.toLowerCase()] = Math.max(0.5, Math.min(5.0, item.weight));
+              }
+            }
+          }
+
+          const vector = this.computeLocalSemanticVector(text, 768, weightedTerms);
+          const latencyMs = Date.now() - start;
+          const activeModel = config.modelName || 'claude-3-5-haiku-20241022';
+          const cost = pricingService.calculateTextAiCost(activeModel, tokenCountEstimate, 50);
+
+          pricingService.recordOperationCost({
+            videoId: context?.videoId,
+            sceneId: context?.sceneId,
+            model: activeModel,
+            inputTokens: tokenCountEstimate,
+            outputTokens: 50,
+            estimatedCost: cost,
+            processingTimeMs: latencyMs,
+            requestType: 'EMBEDDING',
+          });
+
+          return {
+            embedding: vector,
+            dimensions: vector.length,
+            cost,
+            latencyMs,
+          };
+        }
+      } catch (err: any) {
+        console.warn(`Claude Semantic Embedding call failed: ${err.message}.`);
+      }
+    }
+
+    // 3. Voyage AI Embeddings (Anthropic official embedding partner)
+    if (config.provider === 'voyage' && config.apiKey) {
+      try {
+        const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/embeddings` : 'https://api.voyageai.com/v1/embeddings';
+        const modelName = config.modelName || 'voyage-3';
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: modelName,
+            input: text,
+            output_dimension: 768,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          let vector: number[] = data.data?.[0]?.embedding || [];
+          if (vector.length > 768) vector = this.normalizeVector(vector.slice(0, 768));
+          else if (vector.length < 768 && vector.length > 0) {
+            const padded = new Array(768).fill(0);
+            for (let i = 0; i < vector.length; i++) padded[i] = vector[i];
+            vector = this.normalizeVector(padded);
+          }
+
+          const latencyMs = Date.now() - start;
+          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate, modelName);
+          pricingService.recordOperationCost({
+            videoId: context?.videoId,
+            sceneId: context?.sceneId,
+            model: modelName,
+            inputTokens: tokenCountEstimate,
+            outputTokens: 0,
+            estimatedCost: cost,
+            processingTimeMs: latencyMs,
+            requestType: 'EMBEDDING',
+          });
+          return { embedding: vector, dimensions: vector.length, cost, latencyMs };
+        }
+      } catch (err: any) {
+        console.warn(`Voyage AI Embedding call failed: ${err.message}.`);
+      }
+    }
+
+    // 4. Cohere Embeddings
+    if (config.provider === 'cohere' && config.apiKey) {
+      try {
+        const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/embed` : 'https://api.cohere.com/v1/embed';
+        const modelName = config.modelName || 'embed-english-v3.0';
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: modelName,
+            texts: [text],
+            input_type: 'search_document',
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          let vector: number[] = data.embeddings?.[0] || [];
+          if (vector.length > 768) vector = this.normalizeVector(vector.slice(0, 768));
+          else if (vector.length < 768 && vector.length > 0) {
+            const padded = new Array(768).fill(0);
+            for (let i = 0; i < vector.length; i++) padded[i] = vector[i];
+            vector = this.normalizeVector(padded);
+          }
+
+          const latencyMs = Date.now() - start;
+          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate, modelName);
+          pricingService.recordOperationCost({
+            videoId: context?.videoId,
+            sceneId: context?.sceneId,
+            model: modelName,
+            inputTokens: tokenCountEstimate,
+            outputTokens: 0,
+            estimatedCost: cost,
+            processingTimeMs: latencyMs,
+            requestType: 'EMBEDDING',
+          });
+          return { embedding: vector, dimensions: vector.length, cost, latencyMs };
+        }
+      } catch (err: any) {
+        console.warn(`Cohere Embedding call failed: ${err.message}.`);
+      }
+    }
+
+    // 5. Mistral Embeddings
+    if (config.provider === 'mistral' && config.apiKey) {
+      try {
+        const url = config.baseUrl ? `${config.baseUrl.replace(/\/+$/, '')}/embeddings` : 'https://api.mistral.ai/v1/embeddings';
+        const modelName = config.modelName || 'mistral-embed';
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: modelName,
+            input: [text],
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          let vector: number[] = data.data?.[0]?.embedding || [];
+          if (vector.length > 768) vector = this.normalizeVector(vector.slice(0, 768));
+          else if (vector.length < 768 && vector.length > 0) {
+            const padded = new Array(768).fill(0);
+            for (let i = 0; i < vector.length; i++) padded[i] = vector[i];
+            vector = this.normalizeVector(padded);
+          }
+
+          const latencyMs = Date.now() - start;
+          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate, modelName);
+          pricingService.recordOperationCost({
+            videoId: context?.videoId,
+            sceneId: context?.sceneId,
+            model: modelName,
+            inputTokens: tokenCountEstimate,
+            outputTokens: 0,
+            estimatedCost: cost,
+            processingTimeMs: latencyMs,
+            requestType: 'EMBEDDING',
+          });
+          return { embedding: vector, dimensions: vector.length, cost, latencyMs };
+        }
+      } catch (err: any) {
+        console.warn(`Mistral Embedding call failed: ${err.message}.`);
+      }
+    }
+
+    // 6. OpenAI / Ollama / Custom Embeddings
+    if ((config.provider === 'openai' || config.provider === 'groq' || config.provider === 'ollama' || config.provider === 'custom') && (config.apiKey || config.provider === 'ollama')) {
+      try {
+        const url = config.baseUrl
+          ? `${config.baseUrl.replace(/\/+$/, '')}/embeddings`
+          : config.provider === 'ollama'
+          ? 'http://localhost:11434/api/embeddings'
+          : 'https://api.openai.com/v1/embeddings';
+
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (config.apiKey && config.provider !== 'ollama') {
+          headers['Authorization'] = `Bearer ${config.apiKey}`;
+        }
+
+        const modelName = config.modelName || (config.provider === 'ollama' ? 'nomic-embed-text' : 'text-embedding-3-small');
+        const body = config.provider === 'ollama'
+          ? { model: modelName, prompt: text }
+          : { model: modelName, input: text, dimensions: 768 };
+
+        const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+        if (res.ok) {
+          const data = await res.json();
+          let vector: number[] = data.data?.[0]?.embedding || data.embedding || [];
+          if (vector.length > 768) {
+            vector = this.normalizeVector(vector.slice(0, 768));
+          } else if (vector.length < 768 && vector.length > 0) {
+            // Pad to 768 if needed
+            const padded = new Array(768).fill(0);
+            for (let i = 0; i < vector.length; i++) padded[i] = vector[i];
+            vector = this.normalizeVector(padded);
+          }
+
+          const latencyMs = Date.now() - start;
+          const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate, modelName);
+          pricingService.recordOperationCost({
+            videoId: context?.videoId,
+            sceneId: context?.sceneId,
+            model: modelName,
+            inputTokens: tokenCountEstimate,
+            outputTokens: 0,
+            estimatedCost: cost,
+            processingTimeMs: latencyMs,
+            requestType: 'EMBEDDING',
+          });
+          return {
+            embedding: vector,
+            dimensions: vector.length,
+            cost,
+            latencyMs,
+          };
+        }
+      } catch (err: any) {
+        console.warn(`${config.provider.toUpperCase()} Embedding call failed: ${err.message}.`);
+      }
+    }
+
     // High-dimensional Semantic Local Vectorizer Fallback (768 dimensions)
     const vector = this.computeLocalSemanticVector(text, 768);
     const latencyMs = Date.now() - start;
-    const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate);
+    const cost = pricingService.calculateEmbeddingCost(tokenCountEstimate, 'local-semantic-embedding');
 
     pricingService.recordOperationCost({
       videoId: context?.videoId,
@@ -176,12 +502,16 @@ export class EmbeddingService {
   /**
    * Deterministic 768-dimensional normalized vector based on subword hashing and semantic features.
    */
-  public computeLocalSemanticVector(text: string, dimensions = 768): number[] {
+  public computeLocalSemanticVector(
+    text: string,
+    dimensions = 768,
+    customWeights?: Record<string, number>
+  ): number[] {
     const vec = new Float64Array(dimensions);
     const normalized = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
     const tokens = normalized.split(/\s+/).filter(Boolean);
 
-    // Semantic keyword boosting categories
+    // Base semantic keyword boosting categories
     const semanticWeights: Record<string, number> = {
       fight: 3.5,
       fighting: 3.5,
@@ -210,6 +540,7 @@ export class EmbeddingService {
       explosion: 4.0,
       fire: 3.0,
       running: 3.0,
+      ...(customWeights || {}),
     };
 
     // Primary token hashing
@@ -248,6 +579,18 @@ export class EmbeddingService {
     }
 
     return Array.from(vec);
+  }
+
+  public normalizeVector(vec: number[]): number[] {
+    let norm = 0;
+    for (let i = 0; i < vec.length; i++) {
+      norm += vec[i] * vec[i];
+    }
+    norm = Math.sqrt(norm);
+    if (norm > 0) {
+      return vec.map((v) => v / norm);
+    }
+    return vec;
   }
 
   public cosineSimilarity(a: number[], b: number[]): number {

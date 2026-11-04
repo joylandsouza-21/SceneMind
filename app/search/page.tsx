@@ -19,7 +19,15 @@ import {
   X,
   Tag,
   RefreshCw,
-  History
+  History,
+  ChevronLeft,
+  ChevronRight,
+  ChevronDown,
+  ChevronUp,
+  Plus,
+  Send,
+  Pencil,
+  Check
 } from 'lucide-react';
 import { formatTime } from '@/components/VideoPlayer';
 import ClipModal from '@/components/ClipModal';
@@ -28,8 +36,20 @@ import VideoSelectDropdown from '@/components/VideoSelectDropdown';
 import SearchHistoryModal, { SearchHistoryItem } from '@/components/SearchHistoryModal';
 import ScenePreviewModal from '@/components/ScenePreviewModal';
 
-const MAX_PROMPT_TOKENS = 2048;
-const MAX_PROMPT_CHARS = 8192;
+export interface SavedPartPromptResult {
+  id: string;
+  segmentId: string;
+  segmentLabel: string;
+  baseText: string;
+  additionalPrompt: string;
+  fullQuery: string;
+  results: any[];
+  resultCount: number;
+  createdAt: string;
+}
+
+const MAX_PROMPT_TOKENS = 8192;
+const MAX_PROMPT_CHARS = 32768;
 
 interface SegmentMatch {
   segmentId: string;
@@ -111,6 +131,111 @@ function getSegmentColor(index: number) {
   return SEGMENT_COLORS[(index - 1) % SEGMENT_COLORS.length] || SEGMENT_COLORS[0];
 }
 
+function MatchedSegmentsAccordion({
+  segmentMatches,
+  selectedSegmentId,
+  onSelectSegment,
+}: {
+  segmentMatches: SegmentMatch[];
+  selectedSegmentId: string | 'all';
+  onSelectSegment: (id: string) => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  if (!segmentMatches || segmentMatches.length === 0) return null;
+
+  const topMatch = segmentMatches[0];
+  const topColor = getSegmentColor(topMatch.segmentIndex);
+
+  return (
+    <div className="rounded-xl bg-slate-950/70 border border-slate-800/80 overflow-hidden transition-all">
+      {/* 1-Line Collapsed Summary Bar (Default closed) */}
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full px-3 py-2 flex items-center justify-between gap-2 text-left hover:bg-slate-900/60 transition-colors"
+      >
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <Tag className="w-3 h-3 text-indigo-400 shrink-0" />
+          <span className="text-[11px] font-medium text-slate-300 truncate">
+            Matched Prompt Segments ({segmentMatches.length}):
+          </span>
+          <span
+            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ${topColor.bg} ${topColor.text}`}
+          >
+            <span>{topMatch.segmentLabel}</span>
+            <span className="opacity-75 font-mono">({Math.round(topMatch.similarity * 100)}%)</span>
+          </span>
+        </div>
+
+        <div className="flex items-center gap-1 text-[10px] text-slate-400 shrink-0 font-medium">
+          <span>{isOpen ? 'Collapse' : 'Expand'}</span>
+          {isOpen ? <ChevronUp className="w-3.5 h-3.5 text-slate-400" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400" />}
+        </div>
+      </button>
+
+      {/* Expandable Breakdown Area */}
+      {isOpen && (
+        <div className="p-3 pt-2 border-t border-slate-800/60 space-y-2 bg-slate-950/40 animate-in fade-in duration-150">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {segmentMatches.map((sm) => {
+              const isSelected = selectedSegmentId === sm.segmentId;
+              const colorCls = getSegmentColor(sm.segmentIndex);
+              return (
+                <button
+                  key={sm.segmentId}
+                  type="button"
+                  onClick={() => onSelectSegment(isSelected ? 'all' : sm.segmentId)}
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold transition-all ${
+                    isSelected
+                      ? `${colorCls.activeBg} ${colorCls.text} ring-1 ${colorCls.ring} shadow-sm`
+                      : `${colorCls.bg} ${colorCls.text} hover:opacity-80`
+                  }`}
+                  title={`Click to isolate ${sm.segmentLabel}: "${sm.segmentText}"`}
+                >
+                  <span>{sm.segmentLabel}</span>
+                  <span className="opacity-75 font-mono">({Math.round(sm.similarity * 100)}%)</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="space-y-1.5 pt-1">
+            {segmentMatches.map((sm) => {
+              const colorCls = getSegmentColor(sm.segmentIndex);
+              return (
+                <div
+                  key={sm.segmentId}
+                  className="text-[11px] text-slate-400 leading-relaxed pl-2 border-l-2 border-slate-800 hover:border-indigo-500/60 transition-colors flex items-start gap-1.5 cursor-default relative group/partpop"
+                >
+                  <span className={`font-semibold shrink-0 ${colorCls.text}`}>
+                    {sm.segmentLabel}:
+                  </span>
+                  <div className="flex-1 relative">
+                    <span className="line-clamp-2 text-slate-300 block">
+                      "{sm.segmentText}"
+                    </span>
+
+                    {/* Floating Popover on Hover (Does NOT change row height) */}
+                    {sm.segmentText && sm.segmentText.length > 60 && (
+                      <div className="absolute left-0 bottom-full mb-1.5 z-50 hidden group-hover/partpop:block p-3 rounded-xl bg-slate-950/98 border border-slate-700/90 shadow-2xl backdrop-blur-xl text-xs text-slate-100 leading-relaxed max-w-md max-h-56 overflow-y-auto pointer-events-none animate-in fade-in zoom-in-95 duration-100">
+                        <div className="text-[10px] font-semibold text-indigo-300 pb-1 mb-1 border-b border-slate-800 flex items-center justify-between">
+                          <span>{sm.segmentLabel} • {Math.round(sm.similarity * 100)}% match</span>
+                          <span className="text-slate-500 text-[9px]">Full Part Text</span>
+                        </div>
+                        <p className="whitespace-pre-wrap text-slate-200">"{sm.segmentText}"</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function GlobalSearchContent() {
   const searchParams = useSearchParams();
   const [query, setQuery] = useState('');
@@ -122,12 +247,18 @@ function GlobalSearchContent() {
   const [results, setResults] = useState<any[]>([]);
   const [segments, setSegments] = useState<PromptSegmentItem[]>([]);
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | 'all'>('all');
+  const [segmentPage, setSegmentPage] = useState(0);
   const [hasSearched, setHasSearched] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchWarning, setSearchWarning] = useState<string | null>(null);
+  const [additionalPromptError, setAdditionalPromptError] = useState<string | null>(null);
 
   // Search History state
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
   const [activeHistoryId, setActiveHistoryId] = useState<string | null>(null);
+  const [activeSearchName, setActiveSearchName] = useState<string | null>(null);
+  const [isEditingActiveName, setIsEditingActiveName] = useState(false);
+  const [activeNameInput, setActiveNameInput] = useState('');
   const [historyCount, setHistoryCount] = useState<number>(0);
 
   // Clip modal state
@@ -138,9 +269,43 @@ function GlobalSearchContent() {
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const [previewSceneIndex, setPreviewSceneIndex] = useState(0);
 
+  // Part prompt refinement & saved results per segmentId
+  const [partSavedPrompts, setPartSavedPrompts] = useState<Record<string, SavedPartPromptResult[]>>({});
+  const [activePartPromptId, setActivePartPromptId] = useState<Record<string, string>>({});
+  const [additionalPromptInput, setAdditionalPromptInput] = useState<string>('');
+  const [isSearchingAdditional, setIsSearchingAdditional] = useState<boolean>(false);
+  const [isRefinementExpanded, setIsRefinementExpanded] = useState<boolean>(false);
+
+  const savePartPromptsToStorage = (updated: Record<string, SavedPartPromptResult[]>, searchId?: string | null) => {
+    try {
+      if (searchId) {
+        localStorage.setItem(`scenemind_part_prompts_${searchId}`, JSON.stringify(updated));
+      }
+    } catch {}
+  };
+
   const handleOpenPreview = (index: number) => {
     setPreviewSceneIndex(index);
     setPreviewModalOpen(true);
+  };
+
+  const handleSaveActiveSearchName = async () => {
+    if (!activeHistoryId) return;
+    const trimmed = activeNameInput.trim();
+    try {
+      const res = await fetch(`/api/search/history/${activeHistoryId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      if (res.ok) {
+        setActiveSearchName(trimmed || null);
+        setIsEditingActiveName(false);
+        fetchHistoryCount();
+      }
+    } catch (e) {
+      console.error('Failed to update active search name:', e);
+    }
   };
 
   // Prompt token & character estimation
@@ -173,10 +338,12 @@ function GlobalSearchContent() {
     fetch('/api/videos')
       .then((res) => res.json())
       .then((data) => {
-        const vids = data.videos || [];
-        setVideos(vids);
+        const allVids = data.videos || [];
+        // Only videos which have been indexed should show in global search video in scope filter
+        const indexedVids = allVids.filter((v: any) => v.status === 'indexed');
+        setVideos(indexedVids);
         if (urlVideoId) {
-          const match = vids.find((v: any) => v.id === urlVideoId);
+          const match = allVids.find((v: any) => v.id === urlVideoId);
           if (match && match.groupId && !urlGroupId) {
             setSelectedGroupId(match.groupId);
           }
@@ -210,11 +377,13 @@ function GlobalSearchContent() {
     if (!q || q.trim() === '') return;
 
     setSearchError(null);
+    setSearchWarning(null);
+    setAdditionalPromptError(null);
 
     const tokens = Math.ceil(q.length / 4);
     if (tokens > MAX_PROMPT_TOKENS || q.length > MAX_PROMPT_CHARS) {
       setSearchError(
-        `Prompt exceeds Google Gemini embedding limit of 2,048 tokens (~${tokens} tokens / ${q.length} chars). Please shorten your search query.`
+        `Prompt exceeds maximum script limit of ${MAX_PROMPT_TOKENS} tokens (~${tokens} tokens / ${q.length} chars). Please shorten your search script.`
       );
       return;
     }
@@ -225,6 +394,17 @@ function GlobalSearchContent() {
     setIsSearching(true);
     setHasSearched(true);
     setActiveHistoryId(null);
+    setActiveSearchName(null);
+    setIsEditingActiveName(false);
+    setSelectedSegmentId('all');
+
+    // Fresh search: clear out previous part prompt refinements
+    setPartSavedPrompts({});
+    setActivePartPromptId({});
+    setAdditionalPromptInput('');
+    try {
+      localStorage.removeItem('scenemind_part_saved_prompts');
+    } catch {}
 
     try {
       const res = await fetch('/api/search', {
@@ -245,7 +425,13 @@ function GlobalSearchContent() {
         setResults(data.results || []);
         setSegments(data.segments || []);
         setSelectedSegmentId('all');
-        if (data.fromCache && data.searchId) {
+        setSegmentPage(0);
+        if (data.warning) {
+          setSearchWarning(data.warning);
+        } else {
+          setSearchWarning(null);
+        }
+        if (data.searchId) {
           setActiveHistoryId(data.searchId);
         }
         fetchHistoryCount();
@@ -269,7 +455,10 @@ function GlobalSearchContent() {
     setHasSearched(true);
     setResults([]);
     setSegments([]);
+    setSelectedSegmentId('all');
     setSearchError(null);
+    setSearchWarning(null);
+    setAdditionalPromptError(null);
 
     // Immediately reflect selected query, group, and video in UI
     if (historyItem) {
@@ -278,6 +467,9 @@ function GlobalSearchContent() {
       else setSelectedGroupId('all');
       if (historyItem.videoId) setSelectedVideoId(historyItem.videoId);
       else setSelectedVideoId('all');
+      setActiveSearchName(historyItem.name || null);
+      setActiveNameInput(historyItem.name || '');
+      setIsEditingActiveName(false);
     }
 
     try {
@@ -292,6 +484,22 @@ function GlobalSearchContent() {
         setSelectedGroupId(s.groupId || 'all');
         setSelectedVideoId(s.videoId || 'all');
         setActiveHistoryId(s.id);
+        setActiveSearchName(s.name || historyItem?.name || null);
+        setActiveNameInput(s.name || historyItem?.name || '');
+        setIsEditingActiveName(false);
+
+        // Restore saved prompt variations that belong to this restored search!
+        let restoredPartPrompts: Record<string, SavedPartPromptResult[]> = s.partSavedPrompts || {};
+        if (Object.keys(restoredPartPrompts).length === 0) {
+          try {
+            const cached = localStorage.getItem(`scenemind_part_prompts_${s.id}`);
+            if (cached) restoredPartPrompts = JSON.parse(cached);
+          } catch {}
+        }
+        setPartSavedPrompts(restoredPartPrompts);
+        savePartPromptsToStorage(restoredPartPrompts, s.id);
+        setActivePartPromptId({});
+        setAdditionalPromptInput('');
 
         if (s.results && Array.isArray(s.results) && s.results.length > 0) {
           // Smooth 200ms loader transition so user clearly sees data populating
@@ -326,11 +534,191 @@ function GlobalSearchContent() {
   const activeVideo = videos.find((v) => v.id === selectedVideoId);
   const activeSegment = segments.find((s) => s.id === selectedSegmentId);
 
-  // Filtered results based on selected segment
+  // Filtered results based on selected segment (capped to top 5 matches per part)
+  // Filtered results based on selected segment (capped to top 5 matches per part)
+  // Or if a saved additional prompt result is active for this part, use that!
+  // Or if 'all_combined' is active, combine and deduplicate all original + saved variation matches!
   const displayedResults = useMemo(() => {
-    if (selectedSegmentId === 'all') return results;
-    return results.filter((r) => r.matchedSegmentIds?.includes(selectedSegmentId));
-  }, [results, selectedSegmentId]);
+    let list: any[] = [];
+    if (selectedSegmentId === 'all') {
+      list = results;
+    } else {
+      const activePromptId = activePartPromptId[selectedSegmentId];
+      const savedList = partSavedPrompts[selectedSegmentId] || [];
+
+      if (activePromptId === 'all_combined') {
+        const originalMatches = results.filter((r) => r.matchedSegmentIds?.includes(selectedSegmentId)).slice(0, 5);
+        const additionalMatches = savedList.flatMap((p) => p.results || []);
+
+        const sceneMap = new Map<string, any>();
+        for (const item of [...originalMatches, ...additionalMatches]) {
+          const key = item.id || `${item.videoId}_${Math.round(item.startTime)}_${Math.round(item.endTime)}`;
+          if (!sceneMap.has(key)) {
+            sceneMap.set(key, item);
+          } else {
+            const existing = sceneMap.get(key);
+            const sOld = typeof existing.confidenceScore === 'number' ? existing.confidenceScore : (existing.similarityScore ?? 0);
+            const sNew = typeof item.confidenceScore === 'number' ? item.confidenceScore : (item.similarityScore ?? 0);
+            if (sNew > sOld) {
+              sceneMap.set(key, item);
+            }
+          }
+        }
+        list = Array.from(sceneMap.values());
+      } else if (activePromptId && activePromptId !== 'original') {
+        const match = savedList.find((p) => p.id === activePromptId);
+        if (match) {
+          list = match.results;
+        } else {
+          list = results.filter((r) => r.matchedSegmentIds?.includes(selectedSegmentId)).slice(0, 5);
+        }
+      } else {
+        list = results.filter((r) => r.matchedSegmentIds?.includes(selectedSegmentId)).slice(0, 5);
+      }
+    }
+
+    // Strictly sort by highest match percentage on top
+    return [...list].sort((a, b) => {
+      const scoreA = typeof a.confidenceScore === 'number' ? a.confidenceScore : (a.similarityScore ?? 0);
+      const scoreB = typeof b.confidenceScore === 'number' ? b.confidenceScore : (b.similarityScore ?? 0);
+      return scoreB - scoreA;
+    });
+  }, [results, selectedSegmentId, activePartPromptId, partSavedPrompts]);
+
+  const activeSavedPrompt = useMemo(() => {
+    if (selectedSegmentId === 'all' || !activeSegment) return null;
+    const pId = activePartPromptId[selectedSegmentId];
+    if (!pId || pId === 'original') return null;
+    if (pId === 'all_combined') {
+      return {
+        id: 'all_combined',
+        segmentId: selectedSegmentId,
+        segmentLabel: activeSegment.label,
+        baseText: activeSegment.text,
+        additionalPrompt: 'All Combined Variations',
+        fullQuery: 'Combined Original & Additional Searches',
+        results: displayedResults,
+        resultCount: displayedResults.length,
+      } as any;
+    }
+    return (partSavedPrompts[selectedSegmentId] || []).find((p) => p.id === pId) || null;
+  }, [selectedSegmentId, activeSegment, activePartPromptId, partSavedPrompts, displayedResults]);
+
+  const combinedPartResultsCount = useMemo(() => {
+    if (selectedSegmentId === 'all' || !activeSegment) return 0;
+    const originalMatches = results.filter((r) => r.matchedSegmentIds?.includes(selectedSegmentId)).slice(0, 5);
+    const savedList = partSavedPrompts[selectedSegmentId] || [];
+    const additionalMatches = savedList.flatMap((p) => p.results || []);
+    const sceneKeys = new Set<string>();
+    for (const item of [...originalMatches, ...additionalMatches]) {
+      const key = item.id || `${item.videoId}_${Math.round(item.startTime)}_${Math.round(item.endTime)}`;
+      sceneKeys.add(key);
+    }
+    return sceneKeys.size;
+  }, [results, selectedSegmentId, activeSegment, partSavedPrompts]);
+
+  const handleSelectPromptResult = (segmentId: string, promptId: string) => {
+    setActivePartPromptId((prev) => ({
+      ...prev,
+      [segmentId]: promptId,
+    }));
+  };
+
+  const handleRemoveSavedPrompt = (segmentId: string, promptId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const list = partSavedPrompts[segmentId] || [];
+    const updatedList = list.filter((p) => p.id !== promptId);
+    const updated = {
+      ...partSavedPrompts,
+      [segmentId]: updatedList,
+    };
+    setPartSavedPrompts(updated);
+    savePartPromptsToStorage(updated, activeHistoryId);
+
+    if (activeHistoryId) {
+      fetch(`/api/search/history/${activeHistoryId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ partSavedPrompts: updated }),
+      }).catch((e) => console.error('Failed to sync part prompts to history:', e));
+    }
+
+    if (
+      activePartPromptId[segmentId] === promptId ||
+      (updatedList.length === 0 && activePartPromptId[segmentId] === 'all_combined')
+    ) {
+      setActivePartPromptId((prev) => ({ ...prev, [segmentId]: 'original' }));
+    }
+  };
+
+  const handleSearchWithAdditionalPrompt = async () => {
+    if (!activeSegment || !additionalPromptInput.trim() || isSearchingAdditional) return;
+
+    setIsSearchingAdditional(true);
+    setAdditionalPromptError(null);
+    const addPrompt = additionalPromptInput.trim();
+    // Combine base segment text with additional prompt for context-rich search
+    const fullQuery = `${activeSegment.text}. ${addPrompt}`;
+
+    try {
+      const res = await fetch('/api/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: fullQuery,
+          groupId: selectedGroupId !== 'all' ? selectedGroupId : undefined,
+          videoId: selectedVideoId !== 'all' ? selectedVideoId : undefined,
+          forceLive: true,
+          saveHistory: false,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Search failed');
+
+      const newResults = data.results || [];
+      const newSavedItem: SavedPartPromptResult = {
+        id: `part_prompt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        segmentId: activeSegment.id,
+        segmentLabel: activeSegment.label,
+        baseText: activeSegment.text,
+        additionalPrompt: addPrompt,
+        fullQuery: fullQuery,
+        results: newResults,
+        resultCount: newResults.length,
+        createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      };
+
+      const updated = {
+        ...partSavedPrompts,
+        [activeSegment.id]: [...(partSavedPrompts[activeSegment.id] || []), newSavedItem],
+      };
+
+      setPartSavedPrompts(updated);
+      savePartPromptsToStorage(updated, activeHistoryId);
+
+      setActivePartPromptId((prev) => ({
+        ...prev,
+        [activeSegment.id]: newSavedItem.id,
+      }));
+
+      setAdditionalPromptInput('');
+
+      // Persist to search history record in DB without creating a separate entry
+      if (activeHistoryId) {
+        fetch(`/api/search/history/${activeHistoryId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ partSavedPrompts: updated }),
+        }).catch((e) => console.error('Failed to sync part prompts to history:', e));
+      }
+    } catch (err: any) {
+      console.error('Additional prompt search error:', err);
+      setAdditionalPromptError(err.message || 'Failed to search with additional prompt');
+    } finally {
+      setIsSearchingAdditional(false);
+    }
+  };
 
   return (
     <div className="space-y-8 animate-in fade-in">
@@ -365,25 +753,89 @@ function GlobalSearchContent() {
 
       {/* Restored History Search Banner */}
       {activeHistoryId && (
-        <div className="p-3.5 rounded-2xl bg-blue-950/30 border border-blue-500/30 text-xs text-blue-200 flex flex-wrap items-center justify-between gap-2.5 animate-in fade-in">
-          <div className="flex items-center gap-2">
+        <div className="p-3.5 rounded-2xl bg-gradient-to-r from-blue-950/40 via-indigo-950/30 to-slate-900/40 border border-blue-500/30 text-xs text-blue-200 flex flex-wrap items-center justify-between gap-3 animate-in fade-in">
+          <div className="flex items-center gap-2.5 flex-wrap flex-1 min-w-0">
             <History className="w-4 h-4 text-blue-400 shrink-0" />
-            <span>
-              Viewing <strong>saved search results</strong> from history.
-            </span>
+            <span className="text-slate-400 font-medium">Saved Search:</span>
+
+            {isEditingActiveName ? (
+              <div className="flex items-center gap-1.5 flex-1 max-w-sm">
+                <input
+                  type="text"
+                  autoFocus
+                  value={activeNameInput}
+                  onChange={(e) => setActiveNameInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleSaveActiveSearchName();
+                    } else if (e.key === 'Escape') {
+                      setIsEditingActiveName(false);
+                    }
+                  }}
+                  placeholder="Label this conversation (e.g. Loki scene)..."
+                  className="px-2.5 py-1 bg-slate-900 border border-blue-500 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500 w-full"
+                />
+                <button
+                  type="button"
+                  onClick={handleSaveActiveSearchName}
+                  className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold flex items-center gap-1 shadow-sm transition-colors cursor-pointer"
+                  title="Save name"
+                >
+                  <Check className="w-3 h-3" />
+                  <span>Save</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsEditingActiveName(false)}
+                  className="p-1 text-slate-400 hover:text-white"
+                  title="Cancel"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                {activeSearchName ? (
+                  <span className="font-bold text-white bg-blue-500/20 border border-blue-500/35 px-2.5 py-0.5 rounded-lg flex items-center gap-1.5 shadow-sm">
+                    <Sparkles className="w-3 h-3 text-amber-400 shrink-0" />
+                    <span>{activeSearchName}</span>
+                  </span>
+                ) : (
+                  <span className="text-slate-400 italic">No custom label</span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveNameInput(activeSearchName || '');
+                    setIsEditingActiveName(true);
+                  }}
+                  className="p-1 rounded-md text-slate-400 hover:text-blue-300 hover:bg-slate-800/60 transition-colors flex items-center gap-1 text-[11px]"
+                  title={activeSearchName ? "Edit label" : "Add label for this conversation"}
+                >
+                  <Pencil className="w-3 h-3" />
+                  <span className="hidden sm:inline">{activeSearchName ? 'Rename' : 'Add label'}</span>
+                </button>
+              </div>
+            )}
           </div>
-          <div className="flex items-center gap-2">
+
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
               onClick={() => handleSearch()}
-              className="px-3 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs transition-colors"
+              className="px-3 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 active:scale-95 text-white font-medium text-xs shadow transition-all cursor-pointer"
             >
               Re-run Live Search
             </button>
             <button
               type="button"
-              onClick={() => setActiveHistoryId(null)}
-              className="text-slate-400 hover:text-white p-1 rounded-md"
+              onClick={() => {
+                setActiveHistoryId(null);
+                setActiveSearchName(null);
+                setIsEditingActiveName(false);
+              }}
+              className="text-slate-400 hover:text-white p-1 rounded-md hover:bg-slate-800 transition-colors"
               title="Dismiss banner"
             >
               <X className="w-3.5 h-3.5" />
@@ -612,7 +1064,7 @@ function GlobalSearchContent() {
               >
                 ~{estimatedTokens.toLocaleString()}
               </span>
-              <span className="text-slate-500 font-mono">/ 2,048 tokens</span>
+              <span className="text-slate-500 font-mono">/ {MAX_PROMPT_TOKENS.toLocaleString()} tokens</span>
               <span className="text-slate-600">•</span>
               <span className="text-slate-400 font-mono">{query.length.toLocaleString()} chars</span>
             </div>
@@ -634,34 +1086,99 @@ function GlobalSearchContent() {
 
           <div className="flex items-center gap-2">
             <span className="text-[11px] text-slate-500 font-medium hidden md:inline">
-              Google Gemini text-embedding-004 limit: 2,048 tokens (~8,192 chars)
+              Multi-scene script capacity: {MAX_PROMPT_TOKENS.toLocaleString()} tokens (~{MAX_PROMPT_CHARS.toLocaleString()} chars)
             </span>
             {isOverLimit && (
               <span className="text-[11px] font-semibold text-rose-400 bg-rose-500/10 border border-rose-500/30 px-2 py-0.5 rounded-md animate-pulse">
-                Over API Limit
+                Over Script Limit
               </span>
             )}
           </div>
         </div>
 
-        {/* Error Alert Banner */}
+        {/* Error Alert Banner with Re-search Action */}
         {searchError && (
-          <div className="p-4 rounded-2xl bg-rose-950/40 border border-rose-500/40 text-rose-200 flex items-start justify-between gap-3 animate-in fade-in">
+          <div className="p-4 rounded-2xl bg-rose-950/40 border border-rose-500/40 text-rose-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-in fade-in">
             <div className="flex items-start gap-3">
               <AlertCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
               <div className="space-y-1">
-                <h4 className="text-sm font-semibold text-rose-300">Search Error</h4>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h4 className="text-sm font-semibold text-rose-300">Search Error</h4>
+                  {(searchError.includes('503') || searchError.includes('high demand') || searchError.includes('Service Unavailable')) && (
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-rose-900/70 border border-rose-500/30 text-rose-200 font-semibold">
+                      Gemini 503 • High Demand Spike
+                    </span>
+                  )}
+                </div>
                 <p className="text-xs text-rose-200/90 leading-relaxed font-mono">{searchError}</p>
+                {(searchError.includes('503') || searchError.includes('high demand')) && (
+                  <p className="text-[11px] text-rose-300/80">
+                    Spikes in demand are usually temporary. Click <span className="font-semibold text-rose-200">Re-search</span> to retry immediately.
+                  </p>
+                )}
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => setSearchError(null)}
-              className="p-1 rounded-lg text-rose-400 hover:text-rose-200 hover:bg-rose-900/40 transition-colors"
-              title="Dismiss error"
-            >
-              <X className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+              <button
+                type="button"
+                onClick={() => handleSearch(undefined, query, selectedGroupId, selectedVideoId, true)}
+                disabled={isSearching}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 active:scale-95 text-white text-xs font-semibold shadow-md transition-all disabled:opacity-50 cursor-pointer"
+                title="Retry search with same prompt and filters"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isSearching ? 'animate-spin' : ''}`} />
+                <span>{isSearching ? 'Retrying...' : 'Re-search'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSearchError(null)}
+                className="p-1 rounded-lg text-rose-400 hover:text-rose-200 hover:bg-rose-900/40 transition-colors"
+                title="Dismiss error"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* AI Warning / High Demand Fallback Banner */}
+        {searchWarning && !searchError && (
+          <div className="p-4 rounded-2xl bg-amber-950/40 border border-amber-500/40 text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-in fade-in">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h4 className="text-sm font-semibold text-amber-300">AI Service Notice</h4>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-900/70 border border-amber-500/30 text-amber-200 font-semibold">
+                    Fallback Matches Loaded
+                  </span>
+                </div>
+                <p className="text-xs text-amber-200/90 leading-relaxed font-mono">{searchWarning}</p>
+                <p className="text-[11px] text-amber-300/80">
+                  The AI model encountered a temporary high-demand spike. Click <span className="font-semibold text-amber-200">Re-search with AI</span> to retry full AI semantic expansion & reranking.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+              <button
+                type="button"
+                onClick={() => handleSearch(undefined, query, selectedGroupId, selectedVideoId, true)}
+                disabled={isSearching}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 active:scale-95 text-slate-950 font-bold text-xs shadow-md transition-all disabled:opacity-50 cursor-pointer"
+                title="Re-execute search with full AI"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isSearching ? 'animate-spin' : ''}`} />
+                <span>{isSearching ? 'Retrying...' : 'Re-search with AI'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSearchWarning(null)}
+                className="p-1 rounded-lg text-amber-400 hover:text-amber-200 hover:bg-amber-900/40 transition-colors"
+                title="Dismiss notice"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         )}
 
@@ -710,84 +1227,392 @@ function GlobalSearchContent() {
                 <X className="w-3.5 h-3.5" />
               </button>
             )}
+
+            {/* Pagination Controls */}
+            {segments.length > 3 && (
+              <div className="flex items-center gap-1 shrink-0 ml-auto sm:ml-0">
+                <button
+                  type="button"
+                  onClick={() => setSegmentPage(p => Math.max(0, p - 1))}
+                  disabled={segmentPage === 0}
+                  className="p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
+                  title="Previous parts"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <span className="text-[10px] font-mono text-slate-500 min-w-[32px] text-center">
+                  {segmentPage + 1}/{Math.ceil((segments.length + 1) / 4)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSegmentPage(p => Math.min(Math.ceil((segments.length + 1) / 4) - 1, p + 1))}
+                  disabled={segmentPage >= Math.ceil((segments.length + 1) / 4) - 1}
+                  className="p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
+                  title="Next parts"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Storyboard Segment Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-            {/* "All Segments" Card */}
-            <button
-              type="button"
-              onClick={() => setSelectedSegmentId('all')}
-              className={`p-3.5 rounded-2xl border text-left transition-all flex flex-col justify-between space-y-2.5 ${
-                selectedSegmentId === 'all'
-                  ? 'bg-blue-600/15 border-blue-500/50 shadow-lg shadow-blue-500/10 ring-1 ring-blue-500'
-                  : 'bg-slate-900/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-blue-400" />
-                  <span>All Segments</span>
-                </span>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-semibold">
-                  {results.length} clips
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 line-clamp-2">
-                View all retrieved scene candidates matching any part of your prompt.
-              </p>
-              <div className="text-[10px] text-blue-400 pt-1 font-medium">
-                {selectedSegmentId === 'all' ? '● Active' : 'Click to view all'}
-              </div>
-            </button>
+            {(() => {
+              const allCards = [
+                { isAll: true, seg: null },
+                ...segments.map(seg => ({ isAll: false, seg }))
+              ];
+              const displayedCards = allCards.slice(segmentPage * 4, (segmentPage + 1) * 4);
 
-            {/* Individual Segment Cards */}
-            {segments.map((seg) => {
-              const isSelected = selectedSegmentId === seg.id;
-              const color = getSegmentColor(seg.index);
-              return (
-                <button
-                  key={seg.id}
-                  type="button"
-                  onClick={() => setSelectedSegmentId(seg.id)}
-                  className={`p-3.5 rounded-2xl border text-left transition-all flex flex-col justify-between space-y-2.5 group ${
-                    isSelected
-                      ? `${color.activeBg} ${color.activeBorder} shadow-lg ring-1 ${color.ring}`
-                      : 'bg-slate-900/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className={`text-xs font-bold flex items-center gap-1.5 ${color.text}`}>
-                      <span className={`w-4 h-4 rounded-full ${color.badge} text-[10px] flex items-center justify-center font-bold`}>
-                        {seg.index}
-                      </span>
-                      <span>{seg.label}</span>
-                    </span>
-                    <span
-                      className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-semibold ${
-                        seg.matchedClipCount > 0
-                          ? `${color.bg} ${color.text} border ${color.border}`
-                          : 'bg-slate-800 text-slate-500'
+              return displayedCards.map((card) => {
+                if (card.isAll) {
+                  return (
+                    <button
+                      key="all"
+                      type="button"
+                      onClick={() => setSelectedSegmentId('all')}
+                      className={`p-3.5 rounded-2xl border text-left transition-all flex flex-col justify-between space-y-2.5 ${
+                        selectedSegmentId === 'all'
+                          ? 'bg-blue-600/15 border-blue-500/50 shadow-lg shadow-blue-500/10 ring-1 ring-blue-500'
+                          : 'bg-slate-900/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900'
                       }`}
                     >
-                      {seg.matchedClipCount} {seg.matchedClipCount === 1 ? 'clip' : 'clips'}
-                    </span>
-                  </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 text-blue-400" />
+                          <span>All Segments</span>
+                        </span>
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-semibold">
+                          {results.length} clips
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 line-clamp-2">
+                        View all retrieved scene candidates matching any part of your prompt.
+                      </p>
+                      <div className="text-[10px] text-blue-400 pt-1 font-medium">
+                        {selectedSegmentId === 'all' ? '● Active' : 'Click to view all'}
+                      </div>
+                    </button>
+                  );
+                } else {
+                  if (!card.seg) return null;
+                  const seg = card.seg;
+                  const isSelected = selectedSegmentId === seg.id;
+                  const color = getSegmentColor(seg.index);
+                  return (
+                    <button
+                      key={seg.id}
+                      type="button"
+                      onClick={() => setSelectedSegmentId(seg.id)}
+                      className={`p-3.5 rounded-2xl border text-left transition-all flex flex-col justify-between space-y-2.5 group ${
+                        isSelected
+                          ? `${color.activeBg} ${color.activeBorder} shadow-lg ring-1 ${color.ring}`
+                          : 'bg-slate-900/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className={`text-xs font-bold flex items-center gap-1.5 ${color.text}`}>
+                          <span className={`w-4 h-4 rounded-full ${color.badge} text-[10px] flex items-center justify-center font-bold`}>
+                            {seg.index}
+                          </span>
+                          <span>{seg.label}</span>
+                        </span>
+                        <span
+                          className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-semibold ${
+                            seg.matchedClipCount > 0
+                              ? `${color.bg} ${color.text} border ${color.border}`
+                              : 'bg-slate-800 text-slate-500'
+                          }`}
+                        >
+                          {seg.matchedClipCount} {seg.matchedClipCount === 1 ? 'clip' : 'clips'}
+                        </span>
+                      </div>
 
-                  <p className={`text-xs leading-relaxed line-clamp-3 ${isSelected ? 'text-white font-medium' : 'text-slate-300'}`}>
-                    "{seg.text}"
-                  </p>
+                      <div className="relative flex-1 group/partbox">
+                        <p
+                          className={`text-xs leading-relaxed line-clamp-3 ${
+                            isSelected ? 'text-white font-medium' : 'text-slate-300'
+                          }`}
+                        >
+                          "{seg.text}"
+                        </p>
 
-                  <div className="flex items-center justify-between text-[10px] text-slate-500 pt-1">
-                    <span>{seg.wordCount} words</span>
-                    <span className={`font-semibold ${isSelected ? color.text : 'text-blue-400 group-hover:underline'}`}>
-                      {isSelected ? '● Active Filter' : 'Filter clips →'}
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
+                        {/* Floating full-text popover on hover (Zero height increase on card) */}
+                        {seg.text && (
+                          <div className="absolute left-0 right-0 bottom-full mb-2 z-50 hidden group-hover/partbox:block p-3.5 rounded-2xl bg-slate-950/98 border border-slate-700/90 shadow-2xl backdrop-blur-xl text-xs text-slate-100 leading-relaxed max-h-60 overflow-y-auto pointer-events-none animate-in fade-in zoom-in-95 duration-100">
+                            <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-slate-800 text-[10px] text-slate-400 font-semibold">
+                              <span className="flex items-center gap-1.5">
+                                <span className={`w-3.5 h-3.5 rounded-full ${color.badge} flex items-center justify-center text-[9px] font-bold`}>
+                                  {seg.index}
+                                </span>
+                                <span className="text-white">{seg.label}</span>
+                              </span>
+                              <span className="font-mono text-slate-400">{seg.wordCount} words</span>
+                            </div>
+                            <p className="whitespace-pre-wrap text-slate-200 leading-relaxed text-xs">
+                              "{seg.text}"
+                            </p>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex items-center justify-between text-[10px] text-slate-500 pt-1">
+                        <span>{seg.wordCount} words</span>
+                        <span className={`font-semibold ${isSelected ? color.text : 'text-blue-400 group-hover:underline'}`}>
+                          {isSelected ? '● Active Filter' : 'Filter clips →'}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                }
+              });
+            })()}
           </div>
+        </div>
+      )}
+
+      {/* Search New Matches Refinement Panel (Top Position, Expandable to Save Space) */}
+      {selectedSegmentId !== 'all' && activeSegment && !isSearching && (
+        <div className="p-4 sm:p-5 rounded-3xl bg-gradient-to-b from-indigo-950/40 via-slate-900/60 to-slate-950/80 border border-indigo-500/30 shadow-2xl transition-all duration-200 space-y-4">
+          {/* Top Bar Header with Collapse/Expand */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center space-x-2.5 min-w-0">
+              <div className="w-8 h-8 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
+                <Sparkles className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-1.5 shrink-0">
+                    <span>Search New Matches for</span>
+                    <span className="text-indigo-400">{activeSegment.label}</span>
+                  </h3>
+
+                  {/* Active view indicator pill */}
+                  {activePartPromptId[activeSegment.id] === 'all_combined' ? (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                      <Layers className="w-3 h-3" />
+                      <span>All Combined ({displayedResults.length})</span>
+                    </span>
+                  ) : activePartPromptId[activeSegment.id] && activePartPromptId[activeSegment.id] !== 'original' && activeSavedPrompt ? (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                      <Sparkles className="w-3 h-3" />
+                      <span className="truncate max-w-[140px]">"{activeSavedPrompt.additionalPrompt}" ({displayedResults.length})</span>
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-blue-500/20 text-blue-300 border border-blue-500/30">
+                      <Film className="w-3 h-3 text-blue-400" />
+                      <span>Original ({displayedResults.length})</span>
+                    </span>
+                  )}
+
+                  {!isRefinementExpanded && (partSavedPrompts[activeSegment.id]?.length || 0) > 0 && (
+                    <span className="text-[11px] text-slate-400 hidden md:inline">
+                      • {(partSavedPrompts[activeSegment.id]?.length || 0)} variations saved
+                    </span>
+                  )}
+                </div>
+
+                {isRefinementExpanded ? (
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Refine this part with an additional prompt or combine multiple searches. Each search variation is saved.
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-slate-500 mt-0.5 truncate max-w-xl">
+                    Base: "{activeSegment.text}"
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* Expand / Collapse Control Button */}
+            <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+              {isRefinementExpanded && (
+                <div className="hidden sm:block text-xs text-slate-400 font-mono bg-slate-900/80 px-2.5 py-1 rounded-lg border border-slate-800 shrink-0">
+                  Base: <span className="text-slate-300">"{activeSegment.text.slice(0, 35)}..."</span>
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setIsRefinementExpanded(!isRefinementExpanded)}
+                className="px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/60 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                title={isRefinementExpanded ? 'Collapse to save space' : 'Expand search & variations options'}
+              >
+                <span>{isRefinementExpanded ? 'Collapse' : 'Expand Options'}</span>
+                {isRefinementExpanded ? (
+                  <ChevronUp className="w-3.5 h-3.5 text-slate-400" />
+                ) : (
+                  <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Expanded Content: Prompt Variation Chips & Additional Prompt Input */}
+          {isRefinementExpanded && (
+            <div className="pt-3 border-t border-slate-800/80 space-y-4 animate-in fade-in duration-150">
+              {/* Saved Prompts Tabs / Chips for this Part */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] font-semibold text-slate-400 px-0.5">
+                  <span>Search Variations for {activeSegment.label}:</span>
+                  <span className="text-slate-500 font-normal text-[10px]">Select any variation or combine all results</span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* All Prompts (Combined) Option */}
+                  {(partSavedPrompts[activeSegment.id]?.length || 0) > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => handleSelectPromptResult(activeSegment.id, 'all_combined')}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition-all cursor-pointer ${
+                        activePartPromptId[activeSegment.id] === 'all_combined'
+                          ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-500/20 ring-1 ring-purple-400'
+                          : 'bg-slate-900/80 hover:bg-slate-800 text-slate-300 border border-slate-800'
+                      }`}
+                      title="Combine and deduplicate results from Original part matches and all additional prompt searches"
+                    >
+                      <Layers className={`w-3.5 h-3.5 ${activePartPromptId[activeSegment.id] === 'all_combined' ? 'text-purple-200' : 'text-purple-400'}`} />
+                      <span>All Prompts (Combined)</span>
+                      <span className="text-[10px] opacity-80 font-mono px-1.5 py-0.5 rounded-full bg-black/30">
+                        ({combinedPartResultsCount})
+                      </span>
+                    </button>
+                  )}
+
+                  {/* Original Part Button */}
+                  <button
+                    type="button"
+                    onClick={() => handleSelectPromptResult(activeSegment.id, 'original')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition-all cursor-pointer ${
+                      (!activePartPromptId[activeSegment.id] || activePartPromptId[activeSegment.id] === 'original')
+                        ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20 ring-1 ring-blue-400'
+                        : 'bg-slate-900/80 hover:bg-slate-800 text-slate-300 border border-slate-800'
+                    }`}
+                  >
+                    <Film className="w-3 h-3 text-blue-300" />
+                    <span>Original {activeSegment.label}</span>
+                    <span className="text-[10px] opacity-75 font-mono">
+                      ({results.filter((r) => r.matchedSegmentIds?.includes(activeSegment.id)).slice(0, 5).length})
+                    </span>
+                  </button>
+
+                  {/* Saved Additional Prompts */}
+                  {(partSavedPrompts[activeSegment.id] || []).map((saved) => {
+                    const isCur = activePartPromptId[activeSegment.id] === saved.id;
+                    return (
+                      <div
+                        key={saved.id}
+                        className={`inline-flex items-center rounded-xl text-xs font-semibold transition-all border ${
+                          isCur
+                            ? 'bg-indigo-600 text-white border-indigo-400 shadow-md shadow-indigo-500/20 ring-1 ring-indigo-400'
+                            : 'bg-slate-900/80 hover:bg-slate-800 text-slate-300 border border-slate-800'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handleSelectPromptResult(activeSegment.id, saved.id)}
+                          className="px-3 py-1.5 flex items-center space-x-1.5 cursor-pointer text-left"
+                          title={`Query: "${saved.fullQuery}" • Saved at ${saved.createdAt}`}
+                        >
+                          <Sparkles className={`w-3 h-3 ${isCur ? 'text-indigo-200' : 'text-indigo-400'}`} />
+                          <span className="truncate max-w-[180px]">"{saved.additionalPrompt}"</span>
+                          <span className="text-[10px] opacity-75 font-mono">({saved.resultCount})</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => handleRemoveSavedPrompt(activeSegment.id, saved.id, e)}
+                          className={`p-1.5 rounded-r-xl transition-colors hover:text-red-300 cursor-pointer ${
+                            isCur ? 'text-indigo-200 hover:bg-indigo-700' : 'text-slate-500 hover:bg-slate-800'
+                          }`}
+                          title="Remove saved prompt result"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Additional Prompt Input Box */}
+              <div className="pt-1 flex flex-col sm:flex-row items-center gap-2">
+                <div className="relative flex-1 w-full">
+                  <input
+                    type="text"
+                    value={additionalPromptInput}
+                    onChange={(e) => setAdditionalPromptInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !isSearchingAdditional && additionalPromptInput.trim()) {
+                        e.preventDefault();
+                        handleSearchWithAdditionalPrompt();
+                      }
+                    }}
+                    placeholder={`Search new matches for ${activeSegment.label} with additional prompt (e.g. "close-up camera shot", "slow motion in rain")...`}
+                    className="w-full px-4 py-2.5 bg-slate-950/80 border border-slate-700/80 rounded-xl text-white placeholder-slate-500 text-xs focus:outline-none focus:border-indigo-500 transition-colors"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleSearchWithAdditionalPrompt}
+                  disabled={isSearchingAdditional || !additionalPromptInput.trim()}
+                  className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white font-semibold text-xs shadow-lg shadow-indigo-500/20 transition-all flex items-center justify-center space-x-2 disabled:opacity-50 shrink-0 cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
+                >
+                  {isSearchingAdditional ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Searching AI...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3.5 h-3.5 text-indigo-200" />
+                      <span>Search New Matches</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Additional Prompt Search Error Banner with Retry */}
+              {additionalPromptError && (
+                <div className="p-3 rounded-xl bg-rose-950/50 border border-rose-500/40 text-rose-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs animate-in fade-in">
+                  <div className="flex items-start gap-2 min-w-0">
+                    <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                    <div className="space-y-0.5 min-w-0">
+                      <div className="font-semibold text-rose-300 flex items-center gap-1.5 flex-wrap">
+                        <span>Failed to search new matches</span>
+                        {(additionalPromptError.includes('503') || additionalPromptError.includes('high demand')) && (
+                          <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-rose-900/60 border border-rose-500/30 text-rose-300">
+                            503 High Demand
+                          </span>
+                        )}
+                      </div>
+                      <p className="font-mono text-[11px] text-rose-200/90 break-words">{additionalPromptError}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                    <button
+                      type="button"
+                      onClick={handleSearchWithAdditionalPrompt}
+                      disabled={isSearchingAdditional}
+                      className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 active:scale-95 text-white font-semibold text-[11px] flex items-center gap-1.5 shadow-sm transition-all disabled:opacity-50 cursor-pointer"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${isSearchingAdditional ? 'animate-spin' : ''}`} />
+                      <span>{isSearchingAdditional ? 'Retrying...' : 'Retry'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAdditionalPromptError(null)}
+                      className="text-rose-400 hover:text-rose-200 p-1 rounded-md hover:bg-rose-900/40 transition-colors"
+                      title="Dismiss error"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -811,16 +1636,40 @@ function GlobalSearchContent() {
             )}
 
             {selectedSegmentId !== 'all' && activeSegment && (
-              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-500/15 border border-indigo-500/30 text-indigo-300">
-                <span>Filter: {activeSegment.label}</span>
-                <button
-                  onClick={() => setSelectedSegmentId('all')}
-                  className="hover:text-white ml-0.5"
-                  title="Clear segment filter"
-                >
-                  <X className="w-3 h-3" />
-                </button>
-              </span>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-500/15 border border-indigo-500/30 text-indigo-300">
+                  <span>Part: {activeSegment.label}</span>
+                  <button
+                    onClick={() => setSelectedSegmentId('all')}
+                    className="hover:text-white ml-0.5 cursor-pointer"
+                    title="Clear segment filter"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+
+                {activeSavedPrompt && (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-500/15 border border-blue-500/30 text-blue-300">
+                    {activeSavedPrompt.id === 'all_combined' ? (
+                      <Layers className="w-3 h-3 text-purple-400" />
+                    ) : (
+                      <Sparkles className="w-3 h-3 text-blue-400" />
+                    )}
+                    <span className="truncate max-w-[160px]">
+                      {activeSavedPrompt.id === 'all_combined'
+                        ? 'All Prompts Combined'
+                        : `Prompt: "${activeSavedPrompt.additionalPrompt}"`}
+                    </span>
+                    <button
+                      onClick={() => handleSelectPromptResult(activeSegment.id, 'original')}
+                      className="hover:text-white ml-0.5 cursor-pointer"
+                      title="Back to original part matches"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                )}
+              </div>
             )}
           </div>
         </div>
@@ -891,6 +1740,32 @@ function GlobalSearchContent() {
             <p className="text-xs text-slate-500 max-w-sm mx-auto">
               Query millions of frames with zero manual tagging. Enter multi-sentence prompts to automatically map clips to story segments.
             </p>
+          </div>
+        ) : searchError ? (
+          <div className="p-10 rounded-3xl bg-rose-950/20 border border-rose-500/30 text-center space-y-4 animate-in fade-in">
+            <AlertCircle className="w-10 h-10 text-rose-500 mx-auto" />
+            <div className="space-y-1.5">
+              <h4 className="text-slate-100 font-bold text-base">Search Failed</h4>
+              <p className="text-xs text-rose-200/90 font-mono max-w-lg mx-auto bg-slate-950/70 p-3 rounded-xl border border-rose-500/20 leading-relaxed">
+                {searchError}
+              </p>
+            </div>
+            <p className="text-xs text-slate-400 max-w-md mx-auto">
+              {searchError.includes('503') || searchError.includes('high demand')
+                ? 'The AI model is experiencing a high-demand spike. These spikes are usually brief. Click below to retry.'
+                : 'An error occurred while communicating with the search backend. You can retry the query below.'}
+            </p>
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={() => handleSearch(undefined, query, selectedGroupId, selectedVideoId, true)}
+                disabled={isSearching}
+                className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 via-rose-500 to-amber-600 hover:from-rose-500 hover:to-amber-500 text-white font-semibold text-xs shadow-lg shadow-rose-950/50 transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
+              >
+                <RefreshCw className={`w-4 h-4 ${isSearching ? 'animate-spin' : ''}`} />
+                <span>{isSearching ? 'Retrying Search...' : 'Re-search Now'}</span>
+              </button>
+            </div>
           </div>
         ) : displayedResults.length === 0 ? (
           <div className="p-10 rounded-3xl bg-slate-900/40 border border-slate-800 text-center space-y-3">
@@ -964,7 +1839,7 @@ function GlobalSearchContent() {
 
                       <div className="text-right shrink-0">
                         <span className="px-2 py-0.5 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-xs font-semibold block">
-                          Match: {res.similarityScore}%
+                          Match: {typeof res.confidenceScore === 'number' ? res.confidenceScore : res.similarityScore}%
                         </span>
                         {res.isVerified && (
                           <span className="text-[10px] text-emerald-400 font-semibold mt-1 block">
@@ -978,36 +1853,13 @@ function GlobalSearchContent() {
                       {res.description}
                     </p>
 
-                    {/* Matched Prompt Segments Alignment Badges */}
+                    {/* Matched Prompt Segments (1-Line default, expandable) */}
                     {res.segmentMatches && res.segmentMatches.length > 0 && (
-                      <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-1.5">
-                        <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-medium">
-                          <Tag className="w-3 h-3 text-indigo-400" />
-                          <span>Matched Prompt Segments:</span>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          {res.segmentMatches.map((sm: SegmentMatch) => {
-                            const isSelected = selectedSegmentId === sm.segmentId;
-                            const colorCls = getSegmentColor(sm.segmentIndex);
-                            return (
-                              <button
-                                key={sm.segmentId}
-                                type="button"
-                                onClick={() => setSelectedSegmentId(isSelected ? 'all' : sm.segmentId)}
-                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold transition-all ${
-                                  isSelected
-                                    ? `${colorCls.activeBg} ${colorCls.text} ring-1 ${colorCls.ring} shadow-sm`
-                                    : `${colorCls.bg} ${colorCls.text} hover:opacity-80`
-                                }`}
-                                title={`Click to isolate ${sm.segmentLabel}: "${sm.segmentText}"`}
-                              >
-                                <span>{sm.segmentLabel}</span>
-                                <span className="opacity-75 font-mono">({Math.round(sm.similarity * 100)}%)</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
+                      <MatchedSegmentsAccordion
+                        segmentMatches={res.segmentMatches}
+                        selectedSegmentId={selectedSegmentId}
+                        onSelectSegment={setSelectedSegmentId}
+                      />
                     )}
 
                     {res.isVerified && res.verificationReason && (
@@ -1054,6 +1906,7 @@ function GlobalSearchContent() {
             })}
           </div>
         )}
+
       </div>
 
       {/* Global Clip Modal */}
@@ -1091,6 +1944,20 @@ function GlobalSearchContent() {
           fetchHistoryCount();
         }}
         onSelectSearch={handleRestoreSearch}
+        onClearHistory={() => {
+          setPartSavedPrompts({});
+          setActivePartPromptId({});
+          setAdditionalPromptInput('');
+          setActiveHistoryId(null);
+          setActiveSearchName(null);
+          setIsEditingActiveName(false);
+          try {
+            localStorage.removeItem('scenemind_part_saved_prompts');
+            Object.keys(localStorage)
+              .filter((k) => k.startsWith('scenemind_part_prompts_'))
+              .forEach((k) => localStorage.removeItem(k));
+          } catch {}
+        }}
         currentSearchId={activeHistoryId}
       />
     </div>

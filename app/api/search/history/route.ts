@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db/store';
+import { db } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -20,6 +20,7 @@ export async function GET(req: NextRequest) {
       }
       return {
         id: s.id,
+        name: s.name,
         query: s.query,
         groupId: s.groupId,
         groupName: s.groupName,

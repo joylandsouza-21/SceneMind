@@ -14,6 +14,7 @@ const defaultData: DatabaseSchema = {
   jobs: [],
   costs: [],
   vectors: [],
+  configs: [],
 };
 
 class Store {
@@ -73,6 +74,7 @@ class Store {
           jobs: parsed.jobs || [],
           costs: parsed.costs || [],
           vectors: parsed.vectors || [],
+          configs: parsed.configs || [],
         };
       }
     } catch (err) {
@@ -249,28 +251,14 @@ class Store {
     this.reloadIfChanged();
     if (!this.data.searches) this.data.searches = [];
 
-    const q = search.query.trim().toLowerCase();
-    const g = search.groupId || 'all';
-    const v = search.videoId || 'all';
-
-    // If an existing search record has the same query, group scope, and video scope, update it so we don't pollute with duplicates
-    const existingIdx = this.data.searches.findIndex(
-      (s) =>
-        s.query.trim().toLowerCase() === q &&
-        (s.groupId || 'all') === g &&
-        (s.videoId || 'all') === v
-    );
+    // Match by unique search ID (update if same search, otherwise insert new entry)
+    const existingIdx = this.data.searches.findIndex((s) => s.id === search.id);
 
     if (existingIdx >= 0) {
       this.data.searches[existingIdx] = {
         ...this.data.searches[existingIdx],
         ...search,
-        id: this.data.searches[existingIdx].id || search.id,
-        createdAt: new Date().toISOString(),
       };
-      // Move updated entry to the front
-      const [updated] = this.data.searches.splice(existingIdx, 1);
-      this.data.searches.unshift(updated);
     } else {
       this.data.searches.unshift(search);
     }
@@ -299,6 +287,26 @@ class Store {
   public getSearch(id: string): VideoSearch | undefined {
     this.reloadIfChanged();
     return (this.data.searches || []).find((s) => s.id === id);
+  }
+
+  public updateSearchName(id: string, name: string): boolean {
+    this.reloadIfChanged();
+    if (!this.data.searches) return false;
+    const search = this.data.searches.find((s) => s.id === id);
+    if (!search) return false;
+    search.name = name.trim() || undefined;
+    this.save();
+    return true;
+  }
+
+  public updateSearchPartPrompts(id: string, partSavedPrompts: Record<string, any[]>): boolean {
+    this.reloadIfChanged();
+    if (!this.data.searches) return false;
+    const search = this.data.searches.find((s) => s.id === id);
+    if (!search) return false;
+    search.partSavedPrompts = partSavedPrompts;
+    this.save();
+    return true;
   }
 
   public deleteSearch(id: string): boolean {

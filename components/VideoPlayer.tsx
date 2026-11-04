@@ -27,6 +27,8 @@ interface VideoPlayerProps {
   activeSceneRange?: { start: number; end: number } | null;
   onRequestClip?: (currentTime: number) => void;
   initialTime?: number;
+  videoId?: string;
+  onTranscodeRequest?: () => void;
 }
 
 export function formatTime(seconds: number): string {
@@ -47,6 +49,8 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
   activeSceneRange,
   onRequestClip,
   initialTime,
+  videoId,
+  onTranscodeRequest,
 }, ref) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -57,6 +61,8 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [scrubTime, setScrubTime] = useState(0);
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const [isTranscoding, setIsTranscoding] = useState(false);
   const [seekingTargetTime, setSeekingTargetTime] = useState<number | null>(
     initialTime !== undefined && initialTime > 0 ? initialTime : null
   );
@@ -159,25 +165,34 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
     };
     const handleSeeking = () => setIsBuffering(true);
     const handleSeeked = () => {
-      if (video.paused && video.readyState >= 2) {
-        setIsBuffering(false);
-        setSeekingTargetTime(null);
-      }
+      setIsBuffering(false);
+      setSeekingTargetTime(null);
     };
     const handleCanPlay = () => {
-      if (seekingTargetTime === null) {
-        setIsBuffering(false);
-      }
+      setIsBuffering(false);
     };
     const handleCanPlayThrough = () => {
-      if (seekingTargetTime === null) {
-        setIsBuffering(false);
-      }
+      setIsBuffering(false);
     };
     const handleLoadedData = () => {
-      if (seekingTargetTime === null) {
-        setIsBuffering(false);
+      setIsBuffering(false);
+      setPlaybackError(null);
+    };
+
+    const handleError = () => {
+      const err = video.error;
+      let msg = 'Browser failed to decode this video stream.';
+      if (err) {
+        if (err.code === 3) {
+          msg = 'Decoding error: The video codec (like 10-bit HEVC) or audio format is incompatible with native browser playback.';
+        } else if (err.code === 4) {
+          msg = 'Format not supported: Your browser cannot play this video codec directly without transcoding.';
+        } else if (err.code === 2) {
+          msg = 'Network error while loading video stream.';
+        }
       }
+      setPlaybackError(msg);
+      setIsBuffering(false);
     };
 
     video.addEventListener('timeupdate', handleTime);
@@ -191,6 +206,7 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
     video.addEventListener('canplay', handleCanPlay);
     video.addEventListener('canplaythrough', handleCanPlayThrough);
     video.addEventListener('loadeddata', handleLoadedData);
+    video.addEventListener('error', handleError);
 
     return () => {
       video.removeEventListener('timeupdate', handleTime);
@@ -204,8 +220,14 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
       video.removeEventListener('canplay', handleCanPlay);
       video.removeEventListener('canplaythrough', handleCanPlayThrough);
       video.removeEventListener('loadeddata', handleLoadedData);
+      video.removeEventListener('error', handleError);
     };
   }, [onTimeUpdate, isScrubbing, seekingTargetTime]);
+
+  // Reset error on src change
+  useEffect(() => {
+    setPlaybackError(null);
+  }, [src]);
 
   // Safety fallback: Never let buffering state get stuck
   useEffect(() => {
@@ -213,7 +235,7 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(({
     const timer = setTimeout(() => {
       setIsBuffering(false);
       setSeekingTargetTime(null);
-    }, 6000);
+    }, 2500);
     return () => clearTimeout(timer);
   }, [isBuffering, seekingTargetTime]);
 

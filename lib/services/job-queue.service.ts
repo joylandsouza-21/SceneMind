@@ -1,12 +1,13 @@
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
-import { db } from '../db/store';
+import { db } from '../db';
 import { JobType, JobStatus, ProcessingJob, VideoScene, Video } from '../db/types';
 import { ffmpegService } from './ffmpeg.service';
 import { storageService } from './storage.service';
 import { videoAnalysisService } from './video-analysis.service';
 import { embeddingService } from './embedding.service';
 import { vectorService } from './vector.service';
+import { aiConfigService } from './ai-config.service';
 
 export interface JobEventPayload {
   jobId: string;
@@ -16,16 +17,57 @@ export interface JobEventPayload {
   progress: number;
   currentStep: string;
   error?: string;
+  logs?: string[];
   timestamp: string;
 }
 
 class JobQueueService extends EventEmitter {
   private activeJobs: Set<string> = new Set();
   private cancelledVideoIds: Set<string> = new Set();
+  private deletedVideoIds: Set<string> = new Set();
 
   constructor() {
     super();
     this.setMaxListeners(100);
+    if (typeof window === 'undefined') {
+      setTimeout(() => {
+        this.recoverInterruptedJobsOnStartup();
+      }, 500);
+    }
+  }
+
+  public isJobActive(videoId: string): boolean {
+    return this.activeJobs.has(videoId);
+  }
+
+  public recoverInterruptedJobsOnStartup(): void {
+    try {
+      const videos = db.getVideos();
+      const stagnantThresholdMs = 120_000; // Only flag as crashed if inactive for > 2 minutes
+      const now = Date.now();
+
+      for (const video of videos) {
+        const timeSinceUpdate = now - new Date(video.updatedAt || video.createdAt).getTime();
+        if ((video.status === 'processing' || video.status === 'pending') && !this.activeJobs.has(video.id) && timeSinceUpdate > stagnantThresholdMs) {
+          console.log(`[JOB_QUEUE] Flagging interrupted video on startup: ${video.id} (${video.filename})`);
+          video.status = 'failed';
+          video.errorMessage = 'Processing was interrupted (server restarted). Click Reprocess to restart.';
+          db.upsertVideo(video);
+        }
+      }
+      const jobs = db.getJobs();
+      for (const job of jobs) {
+        const timeSinceUpdate = now - new Date(job.updatedAt || job.createdAt).getTime();
+        if ((job.status === 'processing' || job.status === 'pending') && !this.activeJobs.has(job.videoId) && timeSinceUpdate > stagnantThresholdMs) {
+          job.status = 'failed';
+          job.error = 'Server restarted during processing';
+          job.currentStep = 'Server restarted. Ready to reprocess.';
+          db.upsertJob(job);
+        }
+      }
+    } catch (e) {
+      console.warn('[JOB_QUEUE] Could not recover interrupted jobs on startup:', e);
+    }
   }
 
   public cancelJob(jobIdOrVideoId: string): boolean {
@@ -45,16 +87,26 @@ class JobQueueService extends EventEmitter {
     if (videoId) {
       this.cancelledVideoIds.add(videoId);
       this.activeJobs.delete(videoId);
-    }
+      ffmpegService.killProcesses(videoId);
 
-    if (job) {
+      // Cancel all active jobs for this video
+      const allJobs = db.getJobs(videoId);
+      for (const j of allJobs) {
+        this.updateJob(j.id, {
+          status: 'cancelled',
+          currentStep: 'Processing cancelled by user',
+        });
+        this.appendJobLog(j.id, '⛔ Processing was cancelled by user.');
+      }
+    } else if (job) {
       this.updateJob(job.id, {
         status: 'cancelled',
         currentStep: 'Processing cancelled by user',
       });
+      this.appendJobLog(job.id, '⛔ Processing was cancelled by user.');
     }
 
-    if (videoId) {
+    if (videoId && !this.isDeleted(videoId)) {
       const video = db.getVideo(videoId);
       if (video && video.status !== 'indexed') {
         video.status = 'cancelled';
@@ -66,11 +118,84 @@ class JobQueueService extends EventEmitter {
     return true;
   }
 
+  public abortAndPurgeVideo(videoId: string): void {
+    console.log(`[JOB_QUEUE] Aborting and purging active pipeline for video: ${videoId}`);
+    this.deletedVideoIds.add(videoId);
+    this.cancelledVideoIds.add(videoId);
+    this.activeJobs.delete(videoId);
+
+    // 1. Terminate all active FFmpeg processes spawned for this video
+    ffmpegService.killProcesses(videoId);
+
+    // 2. Mark and delete any jobs associated with this video
+    const videoJobs = db.getJobs(videoId);
+    for (const job of videoJobs) {
+      this.emitEvent({
+        ...job,
+        status: 'cancelled',
+        currentStep: 'Processing aborted (video deleted)',
+      });
+      db.deleteJob(job.id);
+    }
+  }
+
   public isCancelled(videoId: string): boolean {
-    return this.cancelledVideoIds.has(videoId);
+    if (!videoId) return false;
+    if (this.cancelledVideoIds.has(videoId) || this.deletedVideoIds.has(videoId)) {
+      return true;
+    }
+    // Verify persistent state directly from DB (persists across Next.js worker threads and hot reloads)
+    const video = db.getVideo(videoId);
+    if (!video || video.status === 'cancelled') {
+      this.cancelledVideoIds.add(videoId);
+      return true;
+    }
+    const jobs = db.getJobs(videoId);
+    if (jobs.length > 0 && jobs.every((j) => j.status === 'cancelled')) {
+      this.cancelledVideoIds.add(videoId);
+      return true;
+    }
+    return false;
+  }
+
+  public cancelAllJobs(): void {
+    console.log('[JOB_QUEUE] Cancelling all active video pipelines and jobs.');
+    const jobs = db.getJobs();
+    for (const job of jobs) {
+      if (job.status === 'pending' || job.status === 'processing') {
+        this.cancelJob(job.id);
+      }
+    }
+    const videos = db.getVideos();
+    for (const video of videos) {
+      if (video.status === 'pending' || video.status === 'processing') {
+        this.cancelJob(video.id);
+      }
+    }
+  }
+
+  public isDeleted(videoId: string): boolean {
+    return this.deletedVideoIds.has(videoId);
+  }
+
+  public safeUpsertVideo(video: Video): void {
+    if (this.isDeleted(video.id)) {
+      return;
+    }
+    if (this.isCancelled(video.id) && video.status !== 'cancelled') {
+      return;
+    }
+    // Verify video actually still exists in store (prevent resurrecting deleted videos)
+    if (!db.getVideo(video.id)) {
+      return;
+    }
+    db.upsertVideo(video);
   }
 
   public createJob(videoId: string, jobType: JobType, totalSteps = 100): ProcessingJob {
+    const timeStr = new Date().toTimeString().split(' ')[0];
+    const initialLog = `[${timeStr}] 🚀 Processing pipeline queued for video analysis.`;
+
     const job: ProcessingJob = {
       id: uuidv4(),
       videoId,
@@ -80,6 +205,7 @@ class JobQueueService extends EventEmitter {
       currentStep: 'Job queued',
       totalSteps,
       retryCount: 0,
+      logs: [initialLog],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -102,6 +228,25 @@ class JobQueueService extends EventEmitter {
     return updated;
   }
 
+  public appendJobLog(jobId: string, message: string, updates?: Partial<ProcessingJob>): ProcessingJob | undefined {
+    const job = db.getJob(jobId);
+    if (!job) return undefined;
+
+    const timeStr = new Date().toTimeString().split(' ')[0];
+    const formattedLog = `[${timeStr}] ${message}`;
+    const logs = [...(job.logs || []), formattedLog];
+
+    const updated: ProcessingJob = {
+      ...job,
+      ...updates,
+      logs,
+      updatedAt: new Date().toISOString(),
+    };
+    db.upsertJob(updated);
+    this.emitEvent(updated);
+    return updated;
+  }
+
   private emitEvent(job: ProcessingJob) {
     const payload: JobEventPayload = {
       jobId: job.id,
@@ -111,6 +256,7 @@ class JobQueueService extends EventEmitter {
       progress: job.progress,
       currentStep: job.currentStep,
       error: job.error,
+      logs: job.logs || [],
       timestamp: new Date().toISOString(),
     };
     this.emit('job-progress', payload);
@@ -145,38 +291,215 @@ class JobQueueService extends EventEmitter {
       console.log(`[VIDEO_ANALYSIS] Starting pipeline for video: ${video.filename} (${video.id})`);
       video.status = 'processing';
       video.processingProgress = 5;
-      db.upsertVideo(video);
+      video.errorMessage = undefined;
+      this.safeUpsertVideo(video);
 
-      // --- STEP 1: Metadata Extraction (if missing or duration <= 0) ---
-      this.updateJob(job.id, { status: 'processing', progress: 10, currentStep: 'Extracting video metadata' });
-      const absPath = storageService.getAbsolutePath(video.storagePath);
+      this.appendJobLog(job.id, `🎬 Initializing processing pipeline for "${video.filename}"...`, {
+        status: 'processing',
+        progress: 5,
+        currentStep: 'Initializing video analysis pipeline',
+      });
 
-      if (video.duration <= 0 || !video.width) {
-        console.log(`[VIDEO_METADATA] Probing ${absPath}`);
-        const meta = await ffmpegService.getMetadata(absPath);
-        video.duration = meta.duration;
-        video.width = meta.width;
-        video.height = meta.height;
-        video.fps = meta.fps;
-        video.format = meta.format;
-        video.sizeBytes = meta.sizeBytes;
-        db.upsertVideo(video);
+      let currentAbsPath = storageService.getAbsolutePath(video.storagePath);
+
+      // --- STEP 1: Codec Compatibility Check & Automatic Web-Transcoding ---
+      this.appendJobLog(job.id, '🔍 [1/6] Inspecting video stream codecs & container compatibility (FFmpeg)...', {
+        progress: 8,
+        currentStep: 'Inspecting video codecs',
+      });
+
+      const codecCheck = await ffmpegService.inspectCodecCompatibility(currentAbsPath);
+
+      if (!codecCheck.isWebReady) {
+        const transcodeStartTime = Date.now();
+        const webStoragePath = video.storagePath.replace(/\.[^/.]+$/, '') + '.mp4';
+        const webAbsPath = storageService.getAbsolutePath(webStoragePath);
+        const tempWebPath = webAbsPath + `.tmp_${Date.now()}.mp4`;
+
+        if (codecCheck.canFastRemux) {
+          this.appendJobLog(
+            job.id,
+            `⚡ [1/6] Codecs are already H.264/AAC. Fast-remuxing container from ${codecCheck.container || 'incompatible'} to web-streamable MP4...`,
+            {
+              progress: 15,
+              currentStep: 'Remuxing video to MP4 container',
+            }
+          );
+          await ffmpegService.remuxToWebMp4(currentAbsPath, tempWebPath, videoId);
+        } else if (codecCheck.canCopyVideo) {
+          this.appendJobLog(
+            job.id,
+            `⚡ [1/6] Video stream is already H.264 8-bit. Fast stream-copying video & converting audio to web AAC...`,
+            {
+              progress: 12,
+              currentStep: 'Stream copying video to web MP4',
+            }
+          );
+          await ffmpegService.transcodeToWebH264(currentAbsPath, tempWebPath, {
+            copyVideo: true,
+            abortKey: videoId,
+            onProgress: (pct, statusMsg) => {
+              if (this.isCancelled(videoId)) return;
+              const overallPct = 10 + Math.round((pct / 100) * 15);
+              const liveMsg = `Stream-copying video (${pct}%): ${statusMsg}`;
+              this.updateJob(job.id, {
+                progress: overallPct,
+                currentStep: liveMsg,
+              });
+              video.processingProgress = overallPct;
+              this.safeUpsertVideo(video);
+            },
+          });
+        } else {
+          const encoder = await ffmpegService.getBestEncoder();
+          const hwLabel = encoder === 'nvenc' ? 'GPU (NVIDIA NVENC)'
+            : encoder === 'vaapi' ? 'GPU (Intel/AMD VAAPI)'
+            : encoder === 'qsv' ? 'GPU (Intel QuickSync)'
+            : 'CPU (libx264 ultrafast)';
+
+          this.appendJobLog(
+            job.id,
+            `⚠️ [1/6] Incompatible format detected: ${codecCheck.reason}. Converting using ${hwLabel}...`,
+            {
+              progress: 10,
+              currentStep: `Converting video (${hwLabel})`,
+            }
+          );
+
+          await ffmpegService.transcodeToWebH264(currentAbsPath, tempWebPath, {
+            copyVideo: false,
+            abortKey: videoId,
+            onProgress: (pct, statusMsg) => {
+              if (this.isCancelled(videoId)) return;
+              const overallPct = 10 + Math.round((pct / 100) * 15);
+              const liveMsg = `Converting video (${pct}%): ${statusMsg}`;
+              this.updateJob(job.id, {
+                progress: overallPct,
+                currentStep: liveMsg,
+              });
+              video.processingProgress = overallPct;
+              this.safeUpsertVideo(video);
+            },
+          });
+        }
+
+        if (this.isCancelled(videoId)) {
+          const fs = await import('fs');
+          if (fs.existsSync(tempWebPath)) {
+            try { fs.unlinkSync(tempWebPath); } catch {}
+          }
+          return;
+        }
+
+        const transcodeElapsedSec = Math.round((Date.now() - transcodeStartTime) / 1000);
+
+        // Replace / finalize the web-streamable MP4 file
+        try {
+          const fs = await import('fs');
+          if (fs.existsSync(webAbsPath)) fs.unlinkSync(webAbsPath);
+          fs.renameSync(tempWebPath, webAbsPath);
+
+          // Clean up original non-web file if it had a different path
+          if (currentAbsPath !== webAbsPath && fs.existsSync(currentAbsPath)) {
+            try {
+              fs.unlinkSync(currentAbsPath);
+            } catch (cleanupErr: any) {
+              console.warn(`[TRANSCODE] Original file cleanup: ${cleanupErr.message}`);
+            }
+          }
+
+          // Update database record with the new .mp4 storage path and filename
+          video.storagePath = webStoragePath;
+          video.filename = video.filename.replace(/\.[^/.]+$/, '') + '.mp4';
+          video.format = 'mp4';
+          this.safeUpsertVideo(video);
+          currentAbsPath = webAbsPath;
+
+          this.appendJobLog(
+            job.id,
+            `✅ [1/6] Web conversion complete in ${transcodeElapsedSec}s! Video is 100% web-streamable MP4 (H.264 8-bit, stereo AAC, faststart streaming enabled).`,
+            {
+              progress: 25,
+              currentStep: 'Web conversion complete',
+            }
+          );
+        } catch (replaceErr: any) {
+          console.warn(`[TRANSCODE] Replace notice: ${replaceErr.message}`);
+        }
+      } else {
+        this.appendJobLog(
+          job.id,
+          `✅ [1/6] Video is already web-ready (${codecCheck.videoCodec.toUpperCase()} 8-bit, ${codecCheck.audioCodec.toUpperCase() || 'AAC'}). Skipping transcode.`,
+          {
+            progress: 25,
+            currentStep: 'Video codec verified',
+          }
+        );
       }
 
       if (this.isCancelled(videoId)) return;
 
-      // --- STEP 2: Scene Segmentation & Multimodal Analysis ---
-      this.updateJob(job.id, { progress: 30, currentStep: 'Analyzing visual scenes with Gemini Video AI' });
-      console.log(`[SCENE_DETECTION] Analyzing video duration: ${video.duration}s`);
+      // --- STEP 2: Metadata Extraction & Poster Frame ---
+      this.appendJobLog(job.id, '📊 [2/6] Extracting video metadata (resolution, frame rate, exact duration)...', {
+        progress: 28,
+        currentStep: 'Extracting video metadata',
+      });
+
+      const meta = await ffmpegService.getMetadata(currentAbsPath);
+      video.duration = meta.duration;
+      video.width = meta.width;
+      video.height = meta.height;
+      video.fps = meta.fps;
+      video.format = meta.format;
+      video.sizeBytes = meta.sizeBytes;
+      this.safeUpsertVideo(video);
+
+      this.appendJobLog(
+        job.id,
+        `📐 [2/6] Video specs: ${meta.width}x${meta.height} @ ${meta.fps} FPS, duration ${Math.round(meta.duration)}s (${(meta.sizeBytes / (1024 * 1024)).toFixed(1)} MB).`,
+        { progress: 30 }
+      );
+
+      // Generate initial thumbnail
+      try {
+        const thumbName = `thumb_${video.id}.jpg`;
+        const thumbPath = storageService.getAbsolutePath(`thumbnails/${thumbName}`);
+        await ffmpegService.extractThumbnail(currentAbsPath, Math.min(2, video.duration * 0.1), thumbPath);
+        this.appendJobLog(job.id, '🖼️ [2/6] Generated poster thumbnail.', { progress: 32 });
+      } catch (e) {
+        console.warn('Initial thumbnail skipped:', e);
+      }
+
+      if (this.isCancelled(videoId)) return;
+
+      // --- STEP 3: Multimodal Scene Analysis via Gemini Video AI ---
+      this.appendJobLog(job.id, '🧠 [3/6] Requesting AI multimodal vision scene breakdown from Gemini...', {
+        progress: 35,
+        currentStep: 'Analyzing scenes with Gemini AI',
+      });
 
       let scenes = db.getScenes(videoId);
       if (scenes.length === 0 || options?.forceReindex) {
-        const analysis = await videoAnalysisService.analyzeVideo(absPath, video.duration, {
+        const analysis = await videoAnalysisService.analyzeVideo(currentAbsPath, video.duration, {
           videoId,
           videoTitle: video.filename || video.originalName,
-          minDuration: 6,
-          maxDuration: 120,
+          minDuration: 4,
+          maxDuration: 60,
+          checkCancelled: () => this.isCancelled(videoId),
+          onProgress: (stepMsg, pct) => {
+            if (this.isCancelled(videoId)) return;
+            this.appendJobLog(job.id, `🤖 [Gemini AI] ${stepMsg}`, {
+              progress: pct || 45,
+              currentStep: stepMsg,
+            });
+            if (pct) {
+              video.processingProgress = pct;
+              this.safeUpsertVideo(video);
+            }
+          },
         });
+
+        if (this.isCancelled(videoId)) return;
 
         // Convert raw detected scenes to VideoScene records
         const newScenes: VideoScene[] = analysis.scenes.map((raw, idx) => ({
@@ -197,14 +520,49 @@ class JobQueueService extends EventEmitter {
           createdAt: new Date().toISOString(),
         }));
 
-        db.replaceScenesForVideo(videoId, newScenes);
-        scenes = newScenes;
+        if (!this.isCancelled(videoId)) {
+          db.replaceScenesForVideo(videoId, newScenes);
+          scenes = newScenes;
+        }
+
+        this.appendJobLog(
+          job.id,
+          `✨ [3/6] Successfully detected and structured ${scenes.length} distinct scenes with timestamps, actions, and character tags.`,
+          {
+            progress: 60,
+            currentStep: `Extracted ${scenes.length} scenes`,
+          }
+        );
+      } else {
+        this.appendJobLog(job.id, `⚡ [3/6] Found ${scenes.length} existing scenes in database. Re-using cached breakdown.`, {
+          progress: 60,
+          currentStep: `Loaded ${scenes.length} scenes`,
+        });
       }
 
-      this.updateJob(job.id, { progress: 55, currentStep: `Identified ${scenes.length} scenes. Generating embeddings` });
+      if (this.isCancelled(videoId)) return;
 
-      // --- STEP 3: Idempotent Vector Embedding Generation ---
+      // --- STEP 4: Vector Embeddings Generation ---
       const totalScenes = scenes.length;
+      const embedConfig = aiConfigService.getEffectiveConfig('embedding');
+      const embedProviderLabel =
+        embedConfig.provider === 'anthropic' ? 'Anthropic Claude'
+        : embedConfig.provider === 'voyage' ? 'Voyage AI'
+        : embedConfig.provider === 'openai' ? 'OpenAI'
+        : embedConfig.provider === 'cohere' ? 'Cohere'
+        : embedConfig.provider === 'mistral' ? 'Mistral'
+        : embedConfig.provider === 'ollama' ? 'Ollama'
+        : 'Google Gemini';
+
+      this.appendJobLog(
+        job.id,
+        `⚡ [4/6] Generating text & visual vector embeddings for ${totalScenes} scenes using ${embedProviderLabel} (${embedConfig.modelName || embedConfig.provider})...`,
+        {
+          progress: 65,
+          currentStep: `Generating vector embeddings via ${embedProviderLabel} (0/${totalScenes})`,
+        }
+      );
+
       for (let i = 0; i < totalScenes; i++) {
         if (this.isCancelled(videoId)) {
           console.log(`[JOB_QUEUE] Pipeline cancelled during embedding for video ${videoId}`);
@@ -227,7 +585,6 @@ class JobQueueService extends EventEmitter {
           events: scene.events,
         });
 
-        console.log(`[EMBEDDING] Generating vector for Scene #${scene.sceneNumber} (${scene.startTime}s - ${scene.endTime}s)`);
         const { embedding } = await embeddingService.generateEmbedding(canonicalText, {
           videoId,
           sceneId: scene.id,
@@ -253,66 +610,81 @@ class JobQueueService extends EventEmitter {
         });
 
         scene.embeddingId = vectorId;
-        db.upsertScene(scene);
+        if (!this.isCancelled(videoId)) {
+          db.upsertScene(scene);
+        }
 
-        const currentPct = 55 + Math.round(((i + 1) / totalScenes) * 35);
-        this.updateJob(job.id, {
-          progress: currentPct,
-          currentStep: `Embedded scene ${i + 1} of ${totalScenes}`,
-        });
+        const currentPct = 65 + Math.round(((i + 1) / totalScenes) * 30);
+
+        if ((i + 1) % 5 === 0 || i === 0 || i === totalScenes - 1) {
+          this.appendJobLog(
+            job.id,
+            `📌 [5/6] Indexed vector for Scene #${scene.sceneNumber} [${scene.startTime}s - ${scene.endTime}s]: "${scene.description.slice(0, 50)}..."`,
+            {
+              progress: currentPct,
+              currentStep: `Embedded scene ${i + 1} of ${totalScenes}`,
+            }
+          );
+        } else {
+          this.updateJob(job.id, {
+            progress: currentPct,
+            currentStep: `Embedded scene ${i + 1} of ${totalScenes}`,
+          });
+        }
 
         video.processingProgress = currentPct;
-        db.upsertVideo(video);
+        this.safeUpsertVideo(video);
       }
 
       if (this.isCancelled(videoId)) return;
 
-      // --- STEP 4: Index Finalization ---
-      this.updateJob(job.id, {
-        progress: 95,
-        currentStep: 'Finalizing vector search index and poster thumbnails',
+      // --- STEP 5: Index Finalization ---
+      this.appendJobLog(job.id, '🎯 [6/6] Finalizing vector search indexes and search capabilities...', {
+        progress: 98,
+        currentStep: 'Finalizing index',
       });
-
-      // Extract a thumbnail from the first scene if possible
-      try {
-        const thumbName = `thumb_${video.id}.jpg`;
-        const thumbPath = storageService.getAbsolutePath(`thumbnails/${thumbName}`);
-        await ffmpegService.extractThumbnail(absPath, Math.min(2, video.duration * 0.1), thumbPath);
-      } catch (e) {
-        console.warn('Thumbnail generation skipped or failed:', e);
-      }
 
       video.status = 'indexed';
       video.processingProgress = 100;
       video.errorMessage = undefined;
-      db.upsertVideo(video);
+      this.safeUpsertVideo(video);
 
-      this.updateJob(job.id, {
-        status: 'completed',
-        progress: 100,
-        currentStep: 'Indexing complete and ready for semantic search',
-      });
+      this.appendJobLog(
+        job.id,
+        `🎉 Pipeline complete! ${scenes.length} scenes indexed and fully ready for multi-modal semantic search & clipping.`,
+        {
+          status: 'completed',
+          progress: 100,
+          currentStep: 'Indexing complete and ready for search',
+        }
+      );
 
       console.log(`[INDEX_FINALIZATION] Completed successfully for video ${video.id}`);
     } catch (err: any) {
-      if (this.isCancelled(videoId)) {
-        console.log(`[JOB_QUEUE] Pipeline aborted for video ${videoId} due to user cancellation.`);
+      if (this.isCancelled(videoId) || this.isDeleted(videoId) || err?.message === 'VIDEO_ANALYSIS_CANCELLED_BY_USER') {
+        console.log(`[JOB_QUEUE] Pipeline aborted for video ${videoId} due to user cancellation or deletion.`);
         return;
       }
 
-      console.error(`[JOB_QUEUE] Pipeline failed for video ${videoId}:`, err);
-      video.status = 'failed';
-      video.errorMessage = err.message || 'Unknown processing error';
-      db.upsertVideo(video);
+      if (!this.isDeleted(videoId) && db.getVideo(videoId)) {
+        console.error(`[JOB_QUEUE] Pipeline failed for video ${videoId}:`, err);
+        video.status = 'failed';
+        video.errorMessage = err.message || 'Unknown processing error';
+        this.safeUpsertVideo(video);
 
-      this.updateJob(job.id, {
-        status: 'failed',
-        error: err.message,
-        currentStep: `Failed: ${err.message}`,
-      });
+        this.appendJobLog(job.id, `❌ Processing failed: ${err.message}`, {
+          status: 'failed',
+          error: err.message,
+          currentStep: `Failed: ${err.message}`,
+        });
+      }
     } finally {
       this.activeJobs.delete(videoId);
-      this.cancelledVideoIds.delete(videoId);
+      ffmpegService.killProcesses(videoId);
+      setTimeout(() => {
+        this.cancelledVideoIds.delete(videoId);
+        this.deletedVideoIds.delete(videoId);
+      }, 10000);
     }
   }
 

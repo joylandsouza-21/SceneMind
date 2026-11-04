@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, Suspense } from 'react';
 import Link from 'next/link';
-import { useSearchParams } from 'next/navigation';
+import { useSearchParams, useRouter } from 'next/navigation';
 import {
   Film,
   Search,
@@ -20,14 +20,30 @@ import {
   Sliders,
   ExternalLink,
   Play,
-  RotateCcw
+  RotateCcw,
+  AlertCircle,
+  X,
+  Folder,
+  Plus,
+  Download,
+  Copy,
+  Check,
+  ChevronDown,
+  FileText,
+  FileCode,
+  SlidersHorizontal
 } from 'lucide-react';
 import VideoPlayer, { VideoPlayerRef, formatTime } from '@/components/VideoPlayer';
 import TimelineBar from '@/components/TimelineBar';
 import ClipModal from '@/components/ClipModal';
+import ProcessingLogsConsole from '@/components/ProcessingLogsConsole';
+import ConfirmModal from '@/components/ConfirmModal';
+import AssignGroupModal from '@/components/AssignGroupModal';
+import ExportScenesModal from '@/components/ExportScenesModal';
 import { VideoScene } from '@/lib/db/types';
 
 function VideoStudioContent({ params }: { params: { id: string } }) {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const tParam = searchParams.get('t') || searchParams.get('start');
   const endParam = searchParams.get('end');
@@ -51,8 +67,32 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
   const [clipEnd, setClipEnd] = useState(10);
   const [clipSceneId, setClipSceneId] = useState<string | undefined>(undefined);
 
+  // Group modal state
+  const [groups, setGroups] = useState<any[]>([]);
+  const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
+
+  // Scene export state
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [quickCopied, setQuickCopied] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
+
   const playerRef = useRef<VideoPlayerRef | null>(null);
   const hasScrolledRef = useRef(false);
+  const isSeekingSceneRef = useRef(false);
+  const seekTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const fetchGroups = async () => {
+    try {
+      const res = await fetch('/api/groups');
+      if (res.ok) {
+        const data = await res.json();
+        setGroups(data.groups || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch groups:', err);
+    }
+  };
 
   const fetchVideoDetails = async () => {
     try {
@@ -68,9 +108,9 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
         // Point to targeted clip/scene if requested in URL
         if (targetSceneIdParam || targetTime !== null) {
           const matched = fetchedScenes.find(
-            (s) =>
+            (s, idx) =>
               (targetSceneIdParam && s.id === targetSceneIdParam) ||
-              (targetTime !== null && targetTime >= s.startTime && targetTime <= s.endTime)
+              (targetTime !== null && targetTime >= s.startTime && (targetTime < s.endTime || idx === fetchedScenes.length - 1))
           );
           if (matched) {
             setActiveScene(matched);
@@ -84,16 +124,225 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
     }
   };
 
+  // Close export menu on outside click
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
+        setExportMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Quick export handlers (defaults to timestamped script)
+  const handleQuickCopyMergedDescriptions = async () => {
+    if (!scenes || scenes.length === 0) return;
+    const sorted = [...scenes].sort((a, b) => {
+      if (a.sceneNumber && b.sceneNumber) return a.sceneNumber - b.sceneNumber;
+      return a.startTime - b.startTime;
+    });
+    const merged = sorted
+      .map(
+        (s, idx) =>
+          `[${formatTime(s.startTime)} → ${formatTime(s.endTime)}] Scene #${s.sceneNumber || idx + 1}: ${s.description.trim()}`
+      )
+      .join('\n\n');
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(merged);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = merged;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      setQuickCopied(true);
+      setTimeout(() => setQuickCopied(false), 2000);
+    } catch (e) {
+      console.error('Failed to copy timestamped descriptions:', e);
+    }
+  };
+
+  const handleQuickDownloadTxt = () => {
+    if (!scenes || scenes.length === 0) return;
+    const sorted = [...scenes].sort((a, b) => {
+      if (a.sceneNumber && b.sceneNumber) return a.sceneNumber - b.sceneNumber;
+      return a.startTime - b.startTime;
+    });
+    const merged = sorted
+      .map(
+        (s, idx) =>
+          `[${formatTime(s.startTime)} → ${formatTime(s.endTime)}] Scene #${s.sceneNumber || idx + 1}: ${s.description.trim()}`
+      )
+      .join('\n\n');
+    const safeTitle = (video?.filename || 'scenes')
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, '_')
+      .replace(/_+/g, '_')
+      .slice(0, 40);
+    const blob = new Blob([merged], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${safeTitle}_timestamped_scenes_${sorted.length}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleQuickDownloadMd = () => {
+    if (!scenes || scenes.length === 0) return;
+    const sorted = [...scenes].sort((a, b) => {
+      if (a.sceneNumber && b.sceneNumber) return a.sceneNumber - b.sceneNumber;
+      return a.startTime - b.startTime;
+    });
+    const safeTitle = (video?.filename || 'scenes')
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, '_')
+      .replace(/_+/g, '_')
+      .slice(0, 40);
+
+    const content = [
+      `# ${video?.filename || 'Video'} - Merged Scene Descriptions`,
+      ``,
+      `- **Total Scenes**: ${sorted.length}`,
+      `- **Duration**: ${formatTime(video?.duration || 0)}`,
+      `- **Exported At**: ${new Date().toLocaleString()}`,
+      ``,
+      `## Continuous Merged Narrative`,
+      ``,
+      sorted.map((s) => s.description.trim()).join(' '),
+      ``,
+      `---`,
+      ``,
+      `## Chronological Breakdown`,
+      ``,
+      ...sorted.map(
+        (s, idx) =>
+          `### Scene ${s.sceneNumber || idx + 1} (${formatTime(s.startTime)} - ${formatTime(s.endTime)})\n\n${s.description.trim()}\n`
+      ),
+    ].join('\n');
+
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${safeTitle}_merged_scenes_${sorted.length}.md`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleQuickDownloadJson = () => {
+    if (!scenes || scenes.length === 0) return;
+    const sorted = [...scenes].sort((a, b) => {
+      if (a.sceneNumber && b.sceneNumber) return a.sceneNumber - b.sceneNumber;
+      return a.startTime - b.startTime;
+    });
+    const safeTitle = (video?.filename || 'scenes')
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, '_')
+      .replace(/_+/g, '_')
+      .slice(0, 40);
+
+    const data = {
+      title: video?.filename || 'Video',
+      totalScenes: sorted.length,
+      duration: video?.duration || 0,
+      mergedDescription: sorted.map((s) => s.description.trim()).join(' '),
+      scenes: sorted.map((s, idx) => ({
+        sceneNumber: s.sceneNumber || idx + 1,
+        startTime: s.startTime,
+        endTime: s.endTime,
+        startTimeFormatted: formatTime(s.startTime),
+        endTimeFormatted: formatTime(s.endTime),
+        duration: s.duration,
+        description: s.description,
+        location: s.location || null,
+        people: s.people || [],
+        actions: s.actions || [],
+        objects: s.objects || [],
+        confidence: s.confidence,
+      })),
+    };
+
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${safeTitle}_merged_scenes_${sorted.length}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   useEffect(() => {
     fetchVideoDetails();
-    const interval = setInterval(fetchVideoDetails, 4000);
-    return () => clearInterval(interval);
+    fetchGroups();
+    const interval = setInterval(fetchVideoDetails, 3000);
+
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource('/api/events');
+      es.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.videoId === params.id) {
+            setVideo((prev: any) =>
+              prev
+                ? {
+                    ...prev,
+                    status: payload.status === 'completed' ? 'indexed' : payload.status,
+                    processingProgress: payload.progress ?? prev.processingProgress,
+                  }
+                : prev
+            );
+            setJobs((prev) => {
+              const existingIdx = prev.findIndex((j) => j.id === payload.jobId);
+              const updatedJob = {
+                id: payload.jobId,
+                videoId: payload.videoId,
+                jobType: payload.jobType,
+                status: payload.status,
+                progress: payload.progress,
+                currentStep: payload.currentStep,
+                logs: payload.logs || [],
+                error: payload.error,
+                updatedAt: payload.timestamp,
+              };
+              if (existingIdx >= 0) {
+                const copy = [...prev];
+                copy[existingIdx] = updatedJob;
+                return copy;
+              }
+              return [updatedJob, ...prev];
+            });
+
+            if (payload.status === 'completed') {
+              fetchVideoDetails();
+            }
+          }
+        } catch {}
+      };
+    } catch {}
+
+    return () => {
+      clearInterval(interval);
+      if (es) es.close();
+    };
   }, [params.id]);
 
   // Sync active scene based on video currentTime (when not explicitly pinned)
   useEffect(() => {
+    if (isSeekingSceneRef.current) return;
     const matched = scenes.find(
-      (s) => currentTime >= s.startTime && currentTime <= s.endTime
+      (s, idx) => currentTime >= s.startTime && (currentTime < s.endTime || idx === scenes.length - 1)
     );
     if (matched && matched.id !== activeScene?.id) {
       setActiveScene(matched);
@@ -117,8 +366,15 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
 
   const handleSeekScene = (scene: VideoScene) => {
     setActiveScene(scene);
+    isSeekingSceneRef.current = true;
+    if (seekTimeoutRef.current) clearTimeout(seekTimeoutRef.current);
+    seekTimeoutRef.current = setTimeout(() => {
+      isSeekingSceneRef.current = false;
+    }, 600);
+
     if (playerRef.current) {
-      playerRef.current.seekTo(scene.startTime);
+      // Offset by +0.05s so HTML5 video keyframe snapping lands comfortably inside scene
+      playerRef.current.seekTo(scene.startTime + 0.05);
     }
   };
 
@@ -129,16 +385,95 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
     setClipModalOpen(true);
   };
 
-  const handleReindex = async () => {
-    if (!confirm('Re-index this entire video with AI? Existing embeddings will be refreshed.')) {
-      return;
+  const [deleting, setDeleting] = useState(false);
+  const [confirmConfig, setConfirmConfig] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmText?: string;
+    cancelText?: string;
+    variant?: 'danger' | 'warning' | 'info';
+    iconType?: 'trash' | 'stop' | 'warning' | 'refresh';
+    onConfirm: () => void | Promise<void>;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+  });
+
+  const promptDeleteVideo = () => {
+    setConfirmConfig({
+      isOpen: true,
+      title: 'Delete Video?',
+      message: `Are you sure you want to delete "${video?.filename || video?.title || 'this video'}" and all its scenes, embeddings, and transcripts? This action cannot be undone.`,
+      confirmText: 'Delete Video',
+      cancelText: 'Cancel',
+      variant: 'danger',
+      iconType: 'trash',
+      onConfirm: async () => {
+        await executeDeleteVideo();
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
+  };
+
+  const executeDeleteVideo = async () => {
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/videos/${params.id}`, { method: 'DELETE' });
+      if (res.ok) {
+        router.push('/videos');
+      } else {
+        alert('Failed to delete video.');
+        setDeleting(false);
+      }
+    } catch (e) {
+      console.error('Delete error:', e);
+      setDeleting(false);
     }
+  };
+
+  const promptReindex = () => {
+    setConfirmConfig({
+      isOpen: true,
+      title: 'Re-index Video with AI?',
+      message: 'This will re-run scene detection, transcription, and multi-modal semantic embeddings. Existing embeddings will be refreshed.',
+      confirmText: 'Re-index Now',
+      cancelText: 'Cancel',
+      variant: 'warning',
+      iconType: 'refresh',
+      onConfirm: async () => {
+        await executeReindex();
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
+  };
+
+  const executeReindex = async () => {
     try {
       await fetch(`/api/videos/${params.id}/reindex`, { method: 'POST' });
       fetchVideoDetails();
     } catch (e) {
       console.error('Reindex error:', e);
     }
+  };
+
+  const promptCancelProcessing = () => {
+    setConfirmConfig({
+      isOpen: true,
+      title: 'Cancel Processing?',
+      message: 'Are you sure you want to stop background video indexing immediately?',
+      confirmText: 'Stop Processing',
+      cancelText: 'Keep Running',
+      variant: 'warning',
+      iconType: 'stop',
+      onConfirm: async () => {
+        await fetch(`/api/jobs/${video.id}/cancel`, { method: 'POST' });
+        fetchVideoDetails();
+        setConfirmConfig((prev) => ({ ...prev, isOpen: false }));
+      },
+    });
   };
 
   if (loading && !video) {
@@ -192,9 +527,32 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
                 {video.status}
               </span>
             </div>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Duration: {formatTime(video.duration)} • {video.width}x{video.height} • {video.fps} FPS
-            </p>
+            <div className="flex items-center gap-2 mt-1">
+              <p className="text-xs text-slate-500">
+                Duration: {formatTime(video.duration)} • {video.width}x{video.height} • {video.fps} FPS
+              </p>
+              <span className="text-slate-700">•</span>
+              {video.groupName ? (
+                <button
+                  onClick={() => setIsGroupModalOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-xs font-medium bg-indigo-500/10 text-indigo-400 border border-indigo-500/25 hover:bg-indigo-500/20 hover:border-indigo-500/40 transition-all cursor-pointer group"
+                  title="Click to change group or remove to 'No Group'"
+                >
+                  <Folder className="w-3 h-3 text-indigo-400" />
+                  <span className="font-semibold text-slate-200">{video.groupName}</span>
+                  <span className="text-[10px] text-indigo-300/60 group-hover:text-indigo-200 ml-0.5 underline">Change</span>
+                </button>
+              ) : (
+                <button
+                  onClick={() => setIsGroupModalOpen(true)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-medium bg-slate-800/80 text-slate-400 border border-slate-700/60 hover:text-white hover:bg-slate-700 hover:border-slate-600 transition-all cursor-pointer"
+                  title="Assign this video to a group or show"
+                >
+                  <Plus className="w-3 h-3 text-blue-400" />
+                  <span>Add Group</span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
@@ -217,15 +575,158 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
             <span>Index Explorer</span>
           </Link>
 
+          {/* Export Scenes (Merged Descriptions) */}
+          {scenes.length > 0 && (
+            <div className="relative" ref={exportMenuRef}>
+              <div className="inline-flex rounded-xl shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => setIsExportModalOpen(true)}
+                  className="flex items-center space-x-2 px-3.5 py-2 rounded-l-xl bg-slate-800/80 hover:bg-slate-700 text-slate-200 text-xs font-medium border border-slate-700 hover:text-white transition-colors cursor-pointer"
+                  title="Export all scene descriptions merged together"
+                >
+                  <Download className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Export Scenes ({scenes.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExportMenuOpen((prev) => !prev)}
+                  className="px-2 py-2 rounded-r-xl bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white text-xs transition-colors border-y border-r border-slate-700 cursor-pointer"
+                  title="Quick export options"
+                >
+                  <ChevronDown className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {exportMenuOpen && (
+                <div className="absolute right-0 mt-2 w-64 rounded-xl bg-slate-900 border border-slate-800 shadow-2xl py-1 z-30 animate-in fade-in zoom-in-95">
+                  <div className="px-3 py-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-800/60">
+                    Export Merged Scenes ({scenes.length})
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsExportModalOpen(true);
+                      setExportMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs text-slate-200 hover:bg-indigo-600/20 hover:text-indigo-300 flex items-center space-x-2 transition-colors cursor-pointer"
+                  >
+                    <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>Preview & Customize Export...</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleQuickDownloadTxt();
+                      setExportMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs text-slate-200 hover:bg-slate-800 flex items-center space-x-2 transition-colors cursor-pointer"
+                  >
+                    <FileText className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Download Timestamped Script (.txt)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleQuickDownloadMd();
+                      setExportMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs text-slate-200 hover:bg-slate-800 flex items-center space-x-2 transition-colors cursor-pointer"
+                  >
+                    <FileText className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Download Markdown Report (.md)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleQuickDownloadJson();
+                      setExportMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs text-slate-200 hover:bg-slate-800 flex items-center space-x-2 transition-colors cursor-pointer"
+                  >
+                    <FileCode className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Download JSON Dataset (.json)</span>
+                  </button>
+                  <div className="border-t border-slate-800/60 my-1"></div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleQuickCopyMergedDescriptions();
+                      setExportMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs text-slate-200 hover:bg-slate-800 flex items-center space-x-2 transition-colors cursor-pointer"
+                  >
+                    <Copy className="w-3.5 h-3.5 text-purple-400" />
+                    <span>Copy Timestamped Script</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {video.status !== 'processing' && video.status !== 'pending' && (
+            <button
+              onClick={promptReindex}
+              className="p-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 hover:text-white transition-colors"
+              title="Force re-run AI indexing"
+            >
+              <RefreshCw className="w-4 h-4" />
+            </button>
+          )}
+
           <button
-            onClick={handleReindex}
-            className="p-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 hover:text-white transition-colors"
-            title="Force re-run AI indexing"
+            onClick={promptDeleteVideo}
+            disabled={deleting}
+            className="p-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+            title="Delete video"
           >
-            <RefreshCw className="w-4 h-4" />
+            {deleting ? (
+              <RefreshCw className="w-4 h-4 animate-spin text-red-400" />
+            ) : (
+              <Trash2 className="w-4 h-4" />
+            )}
           </button>
         </div>
       </div>
+
+      {/* Video Failed / Reprocess Banner */}
+      {video.status === 'failed' && (
+        <div className="p-4 rounded-2xl bg-red-950/40 border border-red-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs animate-in fade-in">
+          <div className="flex items-start space-x-3 min-w-0">
+            <div className="w-8 h-8 rounded-xl bg-red-500/20 border border-red-500/30 text-red-400 flex items-center justify-center shrink-0 mt-0.5">
+              <RotateCcw className="w-4 h-4" />
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center space-x-2">
+                <span className="font-bold text-red-300">AI Processing Failed</span>
+                <span className="text-slate-400">• Ready to Reprocess</span>
+              </div>
+              <p className="text-slate-300/90 leading-relaxed">
+                {video.errorMessage || 'AI analysis could not complete. If your Gemini API key is missing or invalid, add it in AI Config and reprocess.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-2 shrink-0 self-end sm:self-center">
+            <Link
+              href="/config"
+              className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition-colors flex items-center space-x-1.5 border border-slate-700"
+            >
+              <Sliders className="w-3.5 h-3.5 text-indigo-400" />
+              <span>AI Config</span>
+            </Link>
+
+            <button
+              type="button"
+              onClick={promptReindex}
+              className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-semibold transition-colors flex items-center space-x-1.5 shadow-md shadow-amber-500/20"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Reprocess Video</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Target Clip Focused Banner */}
       {targetTime !== null && (
@@ -270,52 +771,129 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
         </div>
       )}
 
-      {/* Processing Status Banner */}
-      {video.status === 'processing' && (
-        <div className="p-5 rounded-2xl bg-slate-900/90 border border-amber-500/30 space-y-3">
+      {/* Video Cancelled Banner */}
+      {video.status === 'cancelled' && (
+        <div className="p-4 rounded-2xl bg-amber-950/30 border border-amber-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs animate-in fade-in">
+          <div className="flex items-start space-x-3 min-w-0">
+            <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0 mt-0.5">
+              <AlertCircle className="w-4 h-4" />
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center space-x-2">
+                <span className="font-bold text-amber-300">Processing Cancelled</span>
+                <span className="text-slate-400">• Pipeline stopped by user</span>
+              </div>
+              <p className="text-slate-300/90 leading-relaxed">
+                Background video processing and transcoding was cancelled. You can restart processing anytime.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-2 shrink-0 self-end sm:self-center">
+            <button
+              type="button"
+              onClick={promptReindex}
+              className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-semibold transition-colors flex items-center space-x-1.5 shadow-md shadow-amber-500/20"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Restart Processing</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Processing Status Banner with Live Terminal Logs */}
+      {(video.status === 'processing' || video.status === 'pending') && (
+        <div className="p-5 rounded-2xl bg-slate-900/90 border border-amber-500/30 space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2.5 text-amber-400 font-semibold text-sm">
               <Activity className="w-4 h-4 animate-spin" />
-              <span>Indexing Video in Background...</span>
+              <span>Indexing Video & Analyzing Scenes in Background...</span>
             </div>
-            <span className="font-mono text-amber-400 text-sm font-bold">{video.processingProgress}%</span>
+            <div className="flex items-center space-x-3">
+              <span className="font-mono text-amber-400 text-sm font-bold">{video.processingProgress}%</span>
+              <button
+                type="button"
+                onClick={promptCancelProcessing}
+                className="px-2.5 py-1 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/40 text-xs font-semibold transition-colors flex items-center space-x-1 cursor-pointer"
+                title="Stop video indexing pipeline immediately"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>Cancel</span>
+              </button>
+            </div>
           </div>
 
           <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
             <div
-              className="bg-amber-500 h-full rounded-full transition-all duration-300"
+              className="bg-gradient-to-r from-amber-500 to-indigo-500 h-full rounded-full transition-all duration-300"
               style={{ width: `${video.processingProgress}%` }}
             />
           </div>
 
-          <div className="flex flex-wrap items-center justify-between text-xs text-slate-400 pt-1">
-            <span>Current Step: {activeJob?.currentStep || 'Extracting multimodal features...'}</span>
-            <span>Scenes Analyzed: {scenes.length}</span>
+          <div className="flex flex-wrap items-center justify-between text-xs text-slate-400">
+            <span className="text-slate-300 font-medium">
+              Current Step: <strong className="text-amber-300 font-normal">{activeJob?.currentStep || 'Processing video stream...'}</strong>
+            </span>
+            <span>Scenes Analyzed: <strong className="text-white">{scenes.length}</strong></span>
           </div>
+
+          <ProcessingLogsConsole
+            logs={activeJob?.logs || []}
+            currentStep={activeJob?.currentStep}
+            progress={video.processingProgress}
+            status="processing"
+            defaultExpanded={true}
+            title="Live Video Analysis & Transcode Logs"
+          />
         </div>
       )}
 
       {/* Video Player & Visual Timeline */}
       <div className="space-y-4">
-        <VideoPlayer
-          ref={playerRef}
-          src={`/api/media/${video.storagePath}`}
-          poster={`/api/media/thumbnails/thumb_${video.id}.jpg`}
-          initialTime={targetTime !== null ? targetTime : undefined}
-          onTimeUpdate={(t) => setCurrentTime(t)}
-          activeSceneRange={
-            activeScene
-              ? { start: activeScene.startTime, end: activeScene.endTime }
-              : targetTime !== null && targetEnd !== null
-              ? { start: targetTime, end: targetEnd }
-              : null
-          }
-          onRequestClip={(t) => {
-            const start = Math.max(0, t - 5);
-            const end = Math.min(video.duration, t + 10);
-            handleOpenClipModal(start, end, activeScene?.id);
-          }}
-        />
+        {(video.status === 'processing' || video.status === 'pending') && video.processingProgress < 25 && !video.storagePath.endsWith('.mp4') ? (
+          <div className="relative aspect-video rounded-2xl bg-slate-950 border border-slate-800 overflow-hidden flex flex-col items-center justify-center space-y-4">
+            <img
+              src={`/api/media/thumbnails/thumb_${video.id}.jpg`}
+              alt={video.filename}
+              className="absolute inset-0 w-full h-full object-cover opacity-20 filter blur-sm"
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+            />
+            <div className="relative z-10 text-center space-y-3 p-6 max-w-md">
+              <div className="w-12 h-12 rounded-2xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center mx-auto text-amber-400 shadow-lg shadow-amber-500/10">
+                <RefreshCw className="w-6 h-6 animate-spin" />
+              </div>
+              <h3 className="text-base font-semibold text-white">Converting Video to Web-Ready Stream</h3>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                {activeJob?.currentStep || 'Transcoding stream to universal H.264 / AAC MP4. Player will unlock automatically when conversion finishes.'}
+              </p>
+              <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-slate-900/90 border border-amber-500/30 text-amber-400 text-xs font-mono font-bold">
+                <Activity className="w-3 h-3 animate-spin" />
+                <span>{video.processingProgress}% Complete</span>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <VideoPlayer
+            ref={playerRef}
+            src={`/api/media/${video.storagePath}`}
+            poster={`/api/media/thumbnails/thumb_${video.id}.jpg`}
+            initialTime={targetTime !== null ? targetTime : undefined}
+            onTimeUpdate={(t) => setCurrentTime(t)}
+            activeSceneRange={
+              activeScene
+                ? { start: activeScene.startTime, end: activeScene.endTime }
+                : targetTime !== null && targetEnd !== null
+                ? { start: targetTime, end: targetEnd }
+                : null
+            }
+            onRequestClip={(t) => {
+              const start = Math.max(0, t - 5);
+              const end = Math.min(video.duration, t + 10);
+              handleOpenClipModal(start, end, activeScene?.id);
+            }}
+          />
+        )}
 
         {/* Visual Continuous Timeline Strip */}
         <TimelineBar
@@ -530,6 +1108,40 @@ function VideoStudioContent({ params }: { params: { id: string } }) {
         initialStart={clipStart}
         initialEnd={clipEnd}
         sceneId={clipSceneId}
+      />
+
+      {/* Custom Confirmation Modal */}
+      <ConfirmModal
+        isOpen={confirmConfig.isOpen}
+        title={confirmConfig.title}
+        message={confirmConfig.message}
+        confirmText={confirmConfig.confirmText}
+        cancelText={confirmConfig.cancelText}
+        variant={confirmConfig.variant}
+        iconType={confirmConfig.iconType}
+        onConfirm={confirmConfig.onConfirm}
+        onClose={() => setConfirmConfig((prev) => ({ ...prev, isOpen: false }))}
+      />
+
+      {/* Assign / Change / Remove Group Modal */}
+      <AssignGroupModal
+        isOpen={isGroupModalOpen}
+        video={video}
+        groups={groups}
+        onClose={() => setIsGroupModalOpen(false)}
+        onSuccess={() => {
+          fetchVideoDetails();
+          fetchGroups();
+        }}
+      />
+
+      {/* Export Scenes Modal */}
+      <ExportScenesModal
+        isOpen={isExportModalOpen}
+        onClose={() => setIsExportModalOpen(false)}
+        scenes={scenes}
+        videoTitle={video?.filename || video?.title || 'Video'}
+        videoDuration={video?.duration || 0}
       />
     </div>
   );

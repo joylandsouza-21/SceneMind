@@ -47,6 +47,7 @@ export interface VideoScene {
 
 export interface VideoSearch {
   id: string;
+  name?: string;
   videoId?: string;
   groupId?: string;
   groupName?: string;
@@ -55,6 +56,7 @@ export interface VideoSearch {
   results?: any[];
   segments?: any[];
   isSegmented?: boolean;
+  partSavedPrompts?: Record<string, any[]>;
   createdAt: string;
 }
 
@@ -96,9 +98,16 @@ export interface ProcessingJob {
   totalSteps: number;
   retryCount: number;
   error?: string;
+  logs?: string[];
   createdAt: string;
   updatedAt: string;
 }
+
+export type CostOperation =
+  | 'QUERY_EXPANSION'
+  | 'PROMPT_SEGMENTATION'
+  | 'QUERY_EMBEDDING'
+  | 'RESULT_VERIFICATION';
 
 export interface AiCost {
   id: string;
@@ -110,6 +119,14 @@ export interface AiCost {
   estimatedCost: number;
   processingTimeMs: number;
   requestType: 'SCENE_ANALYSIS' | 'EMBEDDING' | 'TIMESTAMP_VERIFICATION' | 'RERANKING';
+  /** Finer-grained step label (only on logs recorded after search cost tracking was added) */
+  operation?: CostOperation;
+  /** Search this cost belongs to (only on newer logs) */
+  searchId?: string;
+  /** Search text at the time of the search (kept even if the search isn't saved to history) */
+  searchQuery?: string;
+  /** Video the search was limited to, if any */
+  scopeVideoId?: string;
   createdAt: string;
 }
 
@@ -132,6 +149,24 @@ export interface VectorRecord {
   createdAt: string;
 }
 
+export type ModelProvider = 'gemini' | 'openai' | 'anthropic' | 'voyage' | 'cohere' | 'mistral' | 'groq' | 'ollama' | 'custom';
+
+export type TaskType = 'video_processing' | 'embedding' | 'semantic_search' | 'timestamp_verification';
+
+export interface AiModelConfig {
+  id: string; // e.g. 'video_processing' | 'embedding' | 'semantic_search' | 'timestamp_verification'
+  taskType: TaskType;
+  provider: ModelProvider;
+  modelName: string;
+  apiKey?: string;
+  baseUrl?: string;
+  dimensions?: number;
+  temperature?: number;
+  maxTokens?: number;
+  isActive: boolean;
+  updatedAt: string;
+}
+
 export interface DatabaseSchema {
   videos: Video[];
   groups: VideoGroup[];
@@ -141,4 +176,5 @@ export interface DatabaseSchema {
   jobs: ProcessingJob[];
   costs: AiCost[];
   vectors: VectorRecord[];
+  configs: AiModelConfig[];
 }

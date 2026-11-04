@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db/store';
+import { db } from '@/lib/db';
 import { timestampVerificationService } from '@/lib/services/timestamp-verification.service';
 
 export async function POST(
