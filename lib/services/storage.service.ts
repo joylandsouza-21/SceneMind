@@ -27,7 +27,7 @@ export class LocalStorageService implements IStorageService {
   private thumbnailsDir: string;
 
   constructor(baseDir?: string) {
-    this.baseDir = baseDir || path.resolve(process.cwd(), 'storage');
+    this.baseDir = baseDir || process.env.STORAGE_DIR || path.resolve(process.cwd(), 'storage');
     this.videosDir = path.join(this.baseDir, 'videos');
     this.clipsDir = path.join(this.baseDir, 'clips');
     this.thumbnailsDir = path.join(this.baseDir, 'thumbnails');

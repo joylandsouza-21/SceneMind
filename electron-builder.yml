@@ -1,0 +1,52 @@
+appId: com.scenemind.ai
+productName: SceneMind
+executableName: scenemind
+artifactName: "${productName}-${version}-${os}-${arch}.${ext}"
+directories:
+  output: dist
+
+asar: false
+npmRebuild: false
+nodeGypRebuild: false
+
+files:
+  - electron/**/*
+  - .next/standalone/**/*
+  - package.json
+  - "!node_modules"
+  - "!node_modules/**/*"
+  - "!storage"
+  - "!storage/**/*"
+  - "!data"
+  - "!data/**/*"
+  - "!.next/standalone/storage"
+  - "!.next/standalone/storage/**/*"
+  - "!.next/standalone/data"
+  - "!.next/standalone/data/**/*"
+
+linux:
+  target:
+    - deb
+    - AppImage
+  maintainer: "SceneMind Team <dev@scenemind.local>"
+  category: AudioVideo
+  synopsis: AI Video Search & Scene Intelligence
+
+deb:
+  depends:
+    - ffmpeg
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
