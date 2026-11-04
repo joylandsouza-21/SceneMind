@@ -125,3 +125,4 @@ for (const size of sizes) {
 }
 console.log('Generated Linux icon set in build/icons/');
 console.log('All icons successfully created!');
+
