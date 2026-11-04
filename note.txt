@@ -1,0 +1,11 @@
+# Build Ubuntu .deb installer
+npm run dist:deb
+
+# Build Windows .exe portable binary
+npm run dist:exe
+
+# Build both simultaneously
+npm run dist:all
+
+# Run desktop app locally in development mode
+npm run desktop:dev

@@ -205,3 +205,4 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', cleanup);
 app.on('will-quit', cleanup);
+
