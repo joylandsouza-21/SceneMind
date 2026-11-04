@@ -50,13 +50,37 @@ services:
     volumes:
       - scenemind_storage:/app/storage
       - scenemind_data:/app/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    # depends_on:
+    #   postgres:
+    #     condition: service_healthy
+    #   redis:
+    #     condition: service_healthy
     networks:
       - scenemind_net
+  # # ----------------------------------------------------------------------------
+  # # 3. Vector Database (PostgreSQL 16 with pgvector extension)
+  # # ----------------------------------------------------------------------------
+  # postgres:
+  #   image: pgvector/pgvector:pg16
+  #   container_name: scenemind_postgres
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: ${POSTGRES_USER:-scenemind_admin}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-scenemind_vault_secure_2026}
+  #     POSTGRES_DB: ${POSTGRES_DB:-scenemind_db}
+  #     PGDATA: /var/lib/postgresql/data/pgdata
+  #   volumes:
+  #     - scenemind_pgdata:/var/lib/postgresql/data
+  #     - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+  #   ports:
+  #     - "5432:5432"
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scenemind_admin} -d ${POSTGRES_DB:-scenemind_db}"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #   networks:
+  #     - scenemind_net
 
   # ----------------------------------------------------------------------------
   # 3. Vector Database (PostgreSQL 16 with pgvector extension)
@@ -103,22 +127,22 @@ services:
     networks:
       - scenemind_net
 
-# ------------------------------------------------------------------------------
-# Persistent Docker Volumes
-# ------------------------------------------------------------------------------
+  # ------------------------------------------------------------------------------
+  # Persistent Docker Volumes
+  # ------------------------------------------------------------------------------
 volumes:
   scenemind_storage:
     name: scenemind_storage
   scenemind_data:
     name: scenemind_data
-  scenemind_pgdata:
-    name: scenemind_pgdata
-  scenemind_redis_data:
-    name: scenemind_redis_data
+  # scenemind_pgdata:
+  #   name: scenemind_pgdata
+  # scenemind_redis_data:
+  #   name: scenemind_redis_data
 
-# ------------------------------------------------------------------------------
-# Bridge Network
-# ------------------------------------------------------------------------------
+  # ------------------------------------------------------------------------------
+  # Bridge Network
+  # ------------------------------------------------------------------------------
 networks:
   scenemind_net:
     name: scenemind_network
