@@ -155,12 +155,15 @@ async function startApp() {
 }
 
 function createMainWindow(targetUrl) {
+  const iconPath = path.join(__dirname, 'icon.png');
+
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 1024,
     minHeight: 700,
     title: 'SceneMind AI',
+    icon: fs.existsSync(iconPath) ? iconPath : undefined,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,

@@ -5,6 +5,8 @@ artifactName: "${productName}-${version}-${os}-${arch}.${ext}"
 directories:
   output: dist
 
+icon: build/icon.png
+
 asar: false
 npmRebuild: false
 nodeGypRebuild: false
@@ -25,9 +27,9 @@ files:
   - "!.next/standalone/data/**/*"
 
 linux:
+  icon: build/icons
   target:
     - deb
-    - AppImage
   maintainer: "SceneMind Team <dev@scenemind.local>"
   category: AudioVideo
   synopsis: AI Video Search & Scene Intelligence
@@ -37,11 +39,12 @@ deb:
     - ffmpeg
 
 win:
+  icon: build/icon.ico
   target:
-    - target: nsis
+    - target: portable
       arch:
         - x64
-    - target: portable
+    - target: nsis
       arch:
         - x64
 
